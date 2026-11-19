@@ -16,7 +16,7 @@ class CalendarController extends Controller
         abort_if(now()->parse($data['to'])->diffInDays(now()->parse($data['from'])) > 93, 422, 'Calendar range cannot exceed 94 days.');
         $user = $request->user();
         // Task timestamps are stored in UTC; calendar days must follow the person's own timezone.
-        $tz = in_array($user->timezone, ['Asia/Calcutta', 'Asia/Kolkatta'], true) ? 'Asia/Kolkata' : ($user->timezone ?: config('app.timezone'));
+        $tz = \App\Support\UserTime::zone($user);
         $fromUtc = Carbon::parse($data['from'], $tz)->startOfDay()->utc();
         $toUtc = Carbon::parse($data['to'], $tz)->endOfDay()->utc();
         $localDate = fn ($value) => $value?->copy()->timezone($tz)->toDateString();
@@ -33,12 +33,12 @@ class CalendarController extends Controller
                 $start = $localDate($task->start_at) ?? $localDate($task->due_at);
                 $end = $localDate($task->due_at) ?? $start;
                 if ($end < $start) $end = $start;
-                $events[] = ['id' => 'task-plan-'.$task->id, 'kind' => 'task', 'phase' => 'plan', 'start' => $start, 'end' => $end, 'title' => $task->title, 'detail' => $task->project?->name ?? 'Personal task', 'status' => $task->status, 'priority' => $task->priority, 'url' => '/app/tasks'];
+                $events[] = ['id' => 'task-plan-'.$task->id, 'kind' => 'task', 'phase' => 'plan', 'start' => $start, 'end' => $end, 'title' => $task->title, 'detail' => $task->project?->name ?? 'Personal task', 'status' => $task->status, 'priority' => $task->priority, 'url' => '/app/tasks?task='.$task->id];
             }
-            if ($task->completed_at) $events[] = ['id' => 'task-completed-'.$task->id, 'kind' => 'task', 'phase' => 'completed', 'start' => $localDate($task->completed_at), 'end' => $localDate($task->completed_at), 'title' => $task->title, 'detail' => 'Completed', 'status' => $task->status, 'url' => '/app/tasks'];
+            if ($task->completed_at) $events[] = ['id' => 'task-completed-'.$task->id, 'kind' => 'task', 'phase' => 'completed', 'start' => $localDate($task->completed_at), 'end' => $localDate($task->completed_at), 'title' => $task->title, 'detail' => 'Completed', 'status' => $task->status, 'url' => '/app/tasks?task='.$task->id];
         }
         $meetings=Meeting::where('workspace_id',$user->workspace_id)->where('created_by',$user->id)->where('status','scheduled')->whereBetween('starts_at',[now()->parse($data['from'])->subDay(), now()->parse($data['to'])->addDay()])->get();
-        foreach($meetings as $meeting){$localStart=$meeting->starts_at->copy()->timezone($meeting->timezone);$localEnd=$meeting->ends_at->copy()->timezone($meeting->timezone);if($localStart->toDateString()<$data['from']||$localStart->toDateString()>$data['to'])continue;$events[]=['id'=>'meeting-'.$meeting->id,'kind'=>'meeting','phase'=>'plan','start'=>$localStart->toDateString(),'end'=>$localEnd->toDateString(),'start_at'=>$localStart->toIso8601String(),'end_at'=>$localEnd->toIso8601String(),'timezone'=>$meeting->timezone,'title'=>$meeting->title,'detail'=>trim(($meeting->attendee_name ? 'With '.$meeting->attendee_name.' · ' : '').($meeting->location_label ?? ucfirst($meeting->location_type))),'location_type'=>$meeting->location_type,'location_label'=>$meeting->location_label,'online_url'=>$meeting->online_url,'status'=>'scheduled','url'=>'/app/calendar'];}
+        foreach($meetings as $meeting){$localStart=$meeting->starts_at->copy()->timezone($meeting->timezone);$localEnd=$meeting->ends_at->copy()->timezone($meeting->timezone);if($localStart->toDateString()<$data['from']||$localStart->toDateString()>$data['to'])continue;$events[]=['id'=>'meeting-'.$meeting->id,'kind'=>'meeting','phase'=>'plan','start'=>$localStart->toDateString(),'end'=>$localEnd->toDateString(),'start_at'=>$localStart->toIso8601String(),'end_at'=>$localEnd->toIso8601String(),'timezone'=>$meeting->timezone,'title'=>$meeting->title,'detail'=>trim(($meeting->attendee_name ? 'With '.$meeting->attendee_name.' · ' : '').($meeting->location_label ?? ucfirst($meeting->location_type))),'location_type'=>$meeting->location_type,'location_label'=>$meeting->location_label,'online_url'=>$meeting->online_url,'status'=>'scheduled','url'=>'/app/calendar?date='.$localStart->toDateString()];}
         $projects = Project::where('workspace_id', $user->workspace_id)->where(fn (Builder $q) => $q
             ->whereBetween('start_date', [$data['from'], $data['to']])
             ->orWhereBetween('due_date', [$data['from'], $data['to']])
@@ -48,7 +48,7 @@ class CalendarController extends Controller
         foreach ($projects as $project) {
             $start = $project->start_date?->toDateString() ?? $project->due_date?->toDateString();
             $end = $project->due_date?->toDateString() ?? $start;
-            if ($start && $end) $events[] = ['id' => 'project-'.$project->id, 'kind' => 'project', 'phase' => 'plan', 'start' => $start, 'end' => $end, 'title' => $project->name, 'detail' => 'Project milestone', 'status' => $project->status, 'url' => '/app/projects'];
+            if ($start && $end) $events[] = ['id' => 'project-'.$project->id, 'kind' => 'project', 'phase' => 'plan', 'start' => $start, 'end' => $end, 'title' => $project->name, 'detail' => 'Project milestone', 'status' => $project->status, 'url' => '/app/projects/'.$project->id];
         }
         $unscheduled = Task::where('workspace_id', $user->workspace_id)->whereNull('start_at')->whereNull('due_at')->whereNotIn('status', ['done', 'cancelled']);
         if (! $user->hasRole('workspace_owner')) $unscheduled->where(fn (Builder $q) => $q->where('created_by', $user->id)->orWhereHas('assignees', fn (Builder $a) => $a->where('users.id', $user->id))->orWhereHas('project.members', fn (Builder $m) => $m->where('users.id', $user->id)));

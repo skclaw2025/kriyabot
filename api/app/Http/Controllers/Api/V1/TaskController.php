@@ -8,6 +8,7 @@ use App\Models\Task;
 use App\Models\TaskflowReminder;
 use App\Services\AuditLogger;
 use Illuminate\Database\Eloquent\Builder;
+use App\Support\UserTime;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -33,7 +34,7 @@ class TaskController extends Controller
             $request->validate(['status' => [Rule::in(['open', 'in_progress', 'blocked', 'done', 'cancelled'])]]);
             $query->where('status', $request->string('status')->toString());
         }
-        $tasks = $query->paginate(50);
+        $tasks = $query->paginate(min(200, max(10, (int) $request->query('per_page', 100))));
         $tasks->getCollection()->each(function (Task $task) use ($user): void {
             $task->setAttribute('can_manage', $user->can('update', $task));
             $task->setAttribute('can_upload', $user->can('addAttachment', $task));
@@ -146,7 +147,7 @@ class TaskController extends Controller
         } else {
             $fields['project_id'] = ['sometimes', 'nullable', 'integer', Rule::exists('projects', 'id')->where(fn ($query) => $query->where('workspace_id', $user->workspace_id))];
         }
-        return $request->validate($fields);
+        return UserTime::normalise($request->validate($fields), ['start_at', 'due_at'], $user);
     }
 
     private function syncAssignees(Task $task, array $ids, Request $request): void

@@ -1,75 +1,164 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { dueLabel } from "@/components/tasks/TaskList";
+import { Task, isClosed, readJson } from "@/components/tasks/types";
+import { currentHour, dayKey, formatLongToday, formatTime, fromLocalInput, isOverdue } from "@/lib/datetime";
 
-type Task = { id: number; title: string; status: string; priority: string; due_at?: string | null; project?: { name: string } | null; assignees?: { id: number; name: string }[] };
 type Project = { id: number; name: string; status: string; tasks_count?: number; due_date?: string | null };
+type AgendaItem = { id: string; title: string; kind: string; start_at?: string; detail?: string; status?: string; overdue?: boolean };
+type Me = { name?: string };
 
-const statusLabel = (status: string) => status.replaceAll("_", " ");
-const dateLabel = (value?: string | null) => value ? new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(value)) : "No due date";
-
-function isOverdue(value?: string | null) { return !!value && new Date(value).getTime() < Date.now(); }
-export default function Dashboard() {
+export default function HomePage() {
+  const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [agenda, setAgenda] = useState<AgendaItem[]>([]);
+  const [name, setName] = useState("");
   const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState("");
-  const [today, setToday] = useState("");
+  const [error, setError] = useState("");
+  const [quickTitle, setQuickTitle] = useState("");
+  const [quickWhen, setQuickWhen] = useState<"today" | "tomorrow" | "none">("today");
+  const [quickBusy, setQuickBusy] = useState(false);
+  const [quickNotice, setQuickNotice] = useState<{ id: number; title: string } | null>(null);
+  const [greeting, setGreeting] = useState({ hello: "Hello", date: "" });
 
-  useEffect(() => {
-    setToday(new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(new Date()));
-    let active = true;
-    Promise.all([
-      fetch("/api/backend/tasks", { cache: "no-store" }).then(async response => ({ response, data: await response.json() })),
-      fetch("/api/backend/projects", { cache: "no-store" }).then(async response => ({ response, data: await response.json() })),
-    ]).then(([taskResult, projectResult]) => {
-      if (!active) return;
-      if (!taskResult.response.ok || !projectResult.response.ok) {
-        setLoadError(taskResult.data.message ?? projectResult.data.message ?? "We couldn’t load your workspace summary.");
-        return;
-      }
-      setTasks(taskResult.data.data ?? []);
-      setProjects(projectResult.data.data ?? []);
-    }).catch(() => { if (active) setLoadError("We couldn’t connect to your workspace. Check that the API is running, then refresh."); })
-      .finally(() => { if (active) setLoading(false); });
-    return () => { active = false; };
+  const load = useCallback(async () => {
+    try {
+      const [t, p, c, me] = await Promise.all([
+        fetch("/api/backend/tasks?per_page=200", { cache: "no-store" }),
+        fetch("/api/backend/projects", { cache: "no-store" }),
+        fetch("/api/backend/assistant/context", { cache: "no-store" }),
+        fetch("/api/backend/me", { cache: "no-store" }),
+      ]);
+      const [taskData, projectData, contextData, meData] = await Promise.all([readJson<{ data?: Task[] }>(t), readJson<{ data?: Project[] }>(p), readJson<{ today_schedule?: AgendaItem[] }>(c), readJson<Me>(me)]);
+      if (!t.ok) { setError(taskData.message ?? "Your workspace couldn’t be loaded."); return; }
+      setTasks(taskData.data ?? []); setProjects(projectData.data ?? []); setAgenda(contextData.today_schedule ?? []); setName(meData.name ?? ""); setError("");
+    } catch { setError("Kriyabot couldn’t be reached. Check your connection and refresh."); }
+    finally { setLoading(false); }
   }, []);
+  useEffect(() => {
+    void load();
+    const hour = currentHour();
+    setGreeting({ hello: hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening", date: formatLongToday() });
+  }, [load]);
 
-  const openTasks = useMemo(() => tasks.filter(task => !["done", "cancelled"].includes(task.status)), [tasks]);
-  const dueSoon = useMemo(() => openTasks.filter(task => task.due_at).sort((a, b) => new Date(a.due_at!).getTime() - new Date(b.due_at!).getTime()).slice(0, 4), [openTasks]);
-  const completed = tasks.filter(task => task.status === "done").length;
-  const completion = tasks.length ? Math.round(completed / tasks.length * 100) : 0;
+  const today = dayKey(new Date());
+  const open = useMemo(() => tasks.filter(task => !isClosed(task)), [tasks]);
+  const overdue = useMemo(() => open.filter(task => isOverdue(task.due_at, task.status)).sort((a, b) => Date.parse(a.due_at!) - Date.parse(b.due_at!)), [open]);
+  const dueToday = useMemo(() => open.filter(task => task.due_at && dayKey(task.due_at) === today && !isOverdue(task.due_at, task.status)), [open, today]);
+  const upcoming = useMemo(() => open.filter(task => task.due_at && dayKey(task.due_at) > today).sort((a, b) => Date.parse(a.due_at!) - Date.parse(b.due_at!)).slice(0, 6), [open, today]);
+  const doneThisWeek = useMemo(() => tasks.filter(task => task.status === "done" && task.completed_at && Date.now() - Date.parse(task.completed_at) < 7 * 86_400_000).length, [tasks]);
+  const todayTimeline = useMemo(() => agenda.filter(item => !item.overdue).sort((a, b) => Date.parse(a.start_at ?? "") - Date.parse(b.start_at ?? "")), [agenda]);
+  const projectProgress = useMemo(() => projects.map(project => {
+    const own = tasks.filter(task => task.project?.id === project.id);
+    const done = own.filter(task => task.status === "done").length;
+    return { ...project, total: own.length || project.tasks_count || 0, done, open: own.filter(task => !isClosed(task)).length };
+  }), [projects, tasks]);
 
-  return <div className="dashboard-page">
-    <div className="dashboard-heading">
-      <div><p className="eyebrow">{today || "YOUR WORKSPACE"}</p><h1>Your work, in focus.</h1><p className="dashboard-subtitle">A clear view of what’s moving and what needs you next.</p></div>
-      <div className="dashboard-actions"><Link className="button-secondary" href="/app/projects">＋ New project</Link><Link className="button-primary" href="/app/tasks">＋ Add a task</Link></div>
-    </div>
+  async function quickAdd(event: FormEvent) {
+    event.preventDefault();
+    const title = quickTitle.trim();
+    if (!title) return;
+    setQuickBusy(true); setError("");
+    const due = quickWhen === "none" ? null : fromLocalInput(`${quickWhen === "today" ? today : dayKey(new Date(Date.now() + 86_400_000))}T18:00`);
+    try {
+      const response = await fetch("/api/backend/tasks", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ title, due_at: due, priority: "normal" }) });
+      const data = await readJson<Task>(response);
+      if (!response.ok) { setError(data.message ?? "The task couldn’t be added."); return; }
+      setQuickTitle(""); setQuickNotice({ id: (data as Task).id, title }); void load();
+    } catch { setError("Kriyabot couldn’t be reached. Try again."); }
+    finally { setQuickBusy(false); }
+  }
 
-    {loadError && <div className="dashboard-alert" role="status">{loadError}</div>}
+  const firstName = name.split(/\s+/)[0] ?? "";
+  const niceName = firstName ? firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase() : "";
+  const agendaHref = (item: AgendaItem) => item.kind === "task" ? `/app/tasks?task=${item.id.replace("task-", "")}` : `/app/calendar?date=${item.start_at ? dayKey(item.start_at) : today}`;
 
-    <section className="welcome-banner">
-      <div className="welcome-copy"><span className="banner-kicker">A GOOD DAY TO MAKE PROGRESS</span><h2>Small steps. Meaningful momentum.</h2><p>Keep your priorities visible and move the work that matters forward.</p><Link href="/app/tasks" className="banner-link">Open my work <span aria-hidden="true">↗</span></Link></div>
-      <div className="banner-art" aria-hidden="true"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><div className="art-sun"/><div className="art-card"><span className="art-check">✓</span><span><b>One thing at a time</b><small>Focus creates progress</small></span></div><div className="art-sparkle">✦</div></div>
+  return <div className="kb-page">
+    <header className="kb-page-header">
+      <div><p className="kb-overline">{greeting.date}</p><h1>{greeting.hello}{niceName ? `, ${niceName}` : ""}</h1><p>{loading ? "Getting your day ready…" : summarise(overdue.length, dueToday.length, agenda.filter(a => a.kind === "meeting").length)}</p></div>
+      <div className="kb-header-actions"><Link className="kb-button kb-button-ghost" href="/app/projects?new=1">New project</Link><Link className="kb-button kb-button-primary" href="/app/tasks?new=1">＋ New task</Link></div>
+    </header>
+
+    <form className="kb-quick-add kb-card" onSubmit={quickAdd}>
+      <span className="kb-quick-plus" aria-hidden="true">＋</span>
+      <input value={quickTitle} onChange={event => setQuickTitle(event.target.value)} placeholder="Add a task… e.g. Send fee receipt to accounts" aria-label="Quick add a task" maxLength={240} />
+      <div className="kb-segmented" role="group" aria-label="When is it due">
+        {(["today", "tomorrow", "none"] as const).map(option => <button type="button" key={option} className={quickWhen === option ? "is-active" : ""} onClick={() => setQuickWhen(option)}>{option === "none" ? "No date" : option === "today" ? "Today" : "Tomorrow"}</button>)}
+      </div>
+      <button className="kb-button kb-button-primary" disabled={quickBusy || !quickTitle.trim()}>{quickBusy ? "Adding…" : "Add"}</button>
+    </form>
+    {quickNotice && <p className="kb-alert kb-alert-success" role="status">Added “{quickNotice.title}”{quickWhen !== "none" ? ` · due ${quickWhen} 6:00 pm` : ""}. <Link href={`/app/tasks?task=${quickNotice.id}`}>Open task →</Link></p>}
+    {error && <p className="kb-alert kb-alert-error" role="alert">{error}</p>}
+
+    <section className="kb-stats">
+      <StatCard href="/app/tasks?view=overdue" label="Overdue" value={overdue.length} tone={overdue.length ? "danger" : undefined} loading={loading} />
+      <StatCard href="/app/tasks?view=today" label="Due today" value={dueToday.length} loading={loading} />
+      <StatCard href="/app/tasks" label="Open tasks" value={open.length} loading={loading} />
+      <StatCard href="/app/tasks?view=done" label="Done this week" value={doneThisWeek} tone="success" loading={loading} />
     </section>
 
-    <section className="metric-grid" aria-label="Workspace summary">
-      <article className="metric-card"><div className="metric-top"><span className="metric-icon icon-violet">◷</span><span className="metric-caption">IN PROGRESS</span></div><strong>{loading ? "—" : openTasks.length}</strong><span className="metric-foot">{openTasks.length === 1 ? "task still moving" : "tasks still moving"}</span></article>
-      <article className="metric-card"><div className="metric-top"><span className="metric-icon icon-peach">✓</span><span className="metric-caption">COMPLETED</span></div><strong>{loading ? "—" : completed}</strong><span className="metric-foot">{loading ? "Loading your work" : `${completion}% of all tasks`}</span><div className="metric-progress"><span style={{ width: `${completion}%` }}/></div></article>
-      <article className="metric-card"><div className="metric-top"><span className="metric-icon icon-blue">▧</span><span className="metric-caption">PROJECTS</span></div><strong>{loading ? "—" : projects.length}</strong><span className="metric-foot">{projects.length === 1 ? "active project" : "active projects"}</span></article>
-      <article className="metric-card metric-card-highlight"><div className="metric-top"><span className="metric-icon icon-green">↗</span><span className="metric-caption">YOUR NEXT STEP</span></div><strong className={`metric-next ${dueSoon[0] && isOverdue(dueSoon[0].due_at) ? "is-overdue" : ""}`}>{loading ? "Loading…" : dueSoon.length ? (isOverdue(dueSoon[0].due_at) ? `Overdue · ${dateLabel(dueSoon[0].due_at)}` : dateLabel(dueSoon[0].due_at)) : "Choose one"}</strong><span className="metric-foot">{dueSoon[0]?.title ?? (loading ? "Finding your next task" : "Pick a task and build momentum")}</span></article>
-    </section>
+    <div className="kb-home-grid">
+      <div className="kb-stack">
+        <section className="kb-card">
+          <header className="kb-card-header"><h2>Today</h2><Link href={`/app/calendar?date=${today}`}>Open calendar →</Link></header>
+          {loading ? <div className="kb-skeleton-rows">{[0, 1, 2].map(i => <span key={i} />)}</div>
+            : todayTimeline.length ? <ol className="kb-timeline">{todayTimeline.map(item => <li key={item.id}>
+              <time>{item.start_at ? formatTime(item.start_at) : "All day"}</time>
+              <Link href={agendaHref(item)} className={`kb-timeline-item kind-${item.kind}`}><b>{item.title}</b><small>{item.kind === "meeting" ? "Meeting" : "Task"}{item.detail ? ` · ${item.detail}` : ""}</small></Link>
+            </li>)}</ol>
+            : <div className="kb-empty-inline">Nothing scheduled for today. <Link href="/app/tasks?new=1">Plan something →</Link></div>}
+        </section>
 
-    <div className="dashboard-columns">
-      <section className="content-card upcoming-card"><div className="section-heading"><div><p className="eyebrow">STAY AHEAD</p><h2>Coming up</h2></div><Link href="/app/tasks" className="text-link">All tasks <span aria-hidden="true">→</span></Link></div>
-        {loading ? <div className="empty-inline">Loading your upcoming work…</div> : dueSoon.length ? <div className="task-list">{dueSoon.map((task, index) => <Link href="/app/tasks" className="task-row" key={task.id}><span className={`task-marker marker-${index % 4}`}/><span className="task-row-main"><strong>{task.title}</strong><small>{task.project?.name ?? "Personal task"} · {statusLabel(task.status)}</small></span><span className={`task-date ${isOverdue(task.due_at) ? "is-overdue" : ""}`}>{isOverdue(task.due_at) ? "Overdue · " : ""}{dateLabel(task.due_at)}</span></Link>)}</div> : <div className="empty-state"><span className="empty-illustration">✳</span><strong>{openTasks.length ? "Nothing scheduled just yet" : "You’re all caught up"}</strong><p>{openTasks.length ? "Add a due date to a task and it will show up here." : "Create a task when you’re ready for your next step."}</p><Link href="/app/tasks" className="text-link">Go to my work <span aria-hidden="true">→</span></Link></div>}
-      </section>
+        <section className="kb-card">
+          <header className="kb-card-header"><h2>Coming up</h2><Link href="/app/tasks?view=upcoming">All upcoming →</Link></header>
+          {loading ? <div className="kb-skeleton-rows">{[0, 1, 2].map(i => <span key={i} />)}</div>
+            : upcoming.length ? <ul className="kb-mini-list">{upcoming.map(task => <li key={task.id}><Link href={`/app/tasks?task=${task.id}`}><b>{task.title}</b><small>{task.project?.name ?? "Personal"}</small><span>{dueLabel(task)}</span></Link></li>)}</ul>
+            : <div className="kb-empty-inline">No upcoming deadlines.</div>}
+        </section>
+      </div>
 
-      <section className="content-card projects-card"><div className="section-heading"><div><p className="eyebrow">MAKE IT TOGETHER</p><h2>Your projects</h2></div><Link href="/app/projects" className="text-link">View all <span aria-hidden="true">→</span></Link></div>
-        {loading ? <div className="empty-inline">Loading projects…</div> : projects.length ? <div className="project-list">{projects.slice(0, 3).map((project, index) => <Link href={`/app/projects/${project.id}`} className="project-row" key={project.id}><span className={`project-avatar project-avatar-${index % 3}`}>{project.name.slice(0, 1).toUpperCase()}</span><span className="project-row-main"><strong>{project.name}</strong><small>{project.tasks_count ?? 0} {(project.tasks_count ?? 0) === 1 ? "task" : "tasks"} · {statusLabel(project.status)}</small></span><span className="project-arrow">↗</span></Link>)}</div> : <div className="empty-state project-empty"><span className="empty-illustration">▧</span><strong>Start with a project</strong><p>Bring related tasks and people together in one place.</p><Link href="/app/projects" className="text-link">Create a project <span aria-hidden="true">→</span></Link></div>}
-      </section>
+      <div className="kb-stack">
+        {overdue.length > 0 && <section className="kb-card kb-card-danger">
+          <header className="kb-card-header"><h2>Needs attention</h2><Link href="/app/tasks?view=overdue">View all →</Link></header>
+          <ul className="kb-mini-list">{overdue.slice(0, 5).map(task => <li key={task.id}><Link href={`/app/tasks?task=${task.id}`}><b>{task.title}</b><small>{task.project?.name ?? "Personal"}</small><span className="is-overdue">{dueLabel(task)}</span></Link></li>)}</ul>
+        </section>}
+
+        <section className="kb-card">
+          <header className="kb-card-header"><h2>Projects</h2><Link href="/app/projects">All projects →</Link></header>
+          {loading ? <div className="kb-skeleton-rows">{[0, 1].map(i => <span key={i} />)}</div>
+            : projectProgress.length ? <ul className="kb-project-progress">{projectProgress.slice(0, 5).map(project => {
+              const pct = project.total ? Math.round(project.done / project.total * 100) : 0;
+              return <li key={project.id}><Link href={`/app/projects/${project.id}`}>
+                <span className="kb-project-dot">{project.name.charAt(0).toUpperCase()}</span>
+                <span className="kb-project-copy"><b>{project.name}</b><small>{project.open} open · {project.done}/{project.total} done</small><span className="kb-progress"><span style={{ width: `${pct}%` }} /></span></span>
+                <span className="kb-progress-pct">{pct}%</span>
+              </Link></li>;
+            })}</ul>
+            : <div className="kb-empty-inline">No projects yet. <Link href="/app/projects?new=1">Create one →</Link></div>}
+        </section>
+
+        <section className="kb-card kb-assistant-card">
+          <h2>Ask your assistant</h2>
+          <p>Type or speak in English or Hindi — “Meeting with Rahul tomorrow 4 pm at office, remind me 30 min before.”</p>
+          <button className="kb-button kb-button-ghost" onClick={() => router.push("/app/assistant")}>Open assistant →</button>
+        </section>
+      </div>
     </div>
-    <footer className="dashboard-footer"><span>Make space for focused work.</span><Link href="/app/tasks">See all of my work <span aria-hidden="true">→</span></Link></footer>
   </div>;
+}
+
+function StatCard({ href, label, value, tone, loading }: { href: string; label: string; value: number; tone?: "danger" | "success"; loading: boolean }) {
+  return <Link href={href} className={`kb-stat ${tone ? `tone-${tone}` : ""}`}><span>{label}</span><b>{loading ? "–" : value}</b></Link>;
+}
+
+function summarise(overdue: number, today: number, meetings: number) {
+  const parts: string[] = [];
+  if (meetings) parts.push(`${meetings} meeting${meetings === 1 ? "" : "s"}`);
+  if (today) parts.push(`${today} task${today === 1 ? "" : "s"} due today`);
+  if (overdue) parts.push(`${overdue} overdue`);
+  return parts.length ? `You have ${parts.join(", ")}.` : "Your day is clear. Add what matters next.";
 }

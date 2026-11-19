@@ -1,4 +1,5 @@
 "use client";
+import { dayKey } from "@/lib/datetime";
 
 import Link from "next/link";
 import { createPortal } from "react-dom";
@@ -7,7 +8,7 @@ import type { FormEvent } from "react";
 import { resolveAssistantVoice, type AssistantVoiceId } from "@/lib/assistant-voice";
 
 type AgendaItem = { id: string; title: string; kind: string; phase?: string; start?: string; start_at?: string; detail?: string; status?: string; overdue?: boolean };
-type ChatMessage = { role: "user" | "assistant"; content: string; sources?: Array<{ url: string; title: string }> };
+type ChatMessage = { role: "user" | "assistant"; content: string; sources?: Array<{ url: string; title: string }>; link?: { href: string; label: string } };
 type AssistantDraft = { kind: "task" | "meeting" | "clarification"; title?: string; description?: string | null; project_name?: string | null; priority?: string; due_at?: string | null; starts_at?: string | null; ends_at?: string | null; attendee_name?: string | null; reminder_minutes?: number | null; location_type?: string | null; location_label?: string | null; online_url?: string | null; saved_place_id?: number | null; clarification?: string | null; reply?: string | null };
 type ProjectOption = { id: number; name: string };
 type PlaceOption = { id: number; name: string };
@@ -274,6 +275,7 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
     const conversation = [...messages, { role: "user" as const, content: command }];
     setMessages(conversation); setBusy(true); setError("");
     let answer = "";
+    let savedLink: { href: string; label: string } | null = null;
     try {
       const parseCommand = pendingVoiceCommandRef.current ? `Continue the same request. Original request: ${pendingVoiceCommandRef.current}. The user is answering your clarification: ${command}. Update and return the original task or meeting.` : command;
       const parsedResponse = await fetch("/api/backend/assistant/parse", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ command: parseCommand, input_language: inputLanguage }) });
@@ -289,6 +291,7 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
         const response = await fetch("/api/backend/tasks", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ title: draft.title, description: draft.description, priority: draft.priority ?? "normal", due_at: draft.due_at ? new Date(draft.due_at).toISOString() : null, project_id: project?.id ?? null, reminder_minutes: draft.reminder_minutes ?? null }) });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data.message ?? "I couldn't save that task.");
+        if (data.id) savedLink = { href: `/app/tasks?task=${data.id}`, label: "Open task" };
         pendingVoiceCommandRef.current = "";
         await refreshAgenda();
         answer = inputLanguage === "hi-IN" ? `काम “${draft.title}” सेव कर दिया${project ? ` और ${project.name} प्रोजेक्ट में जोड़ दिया` : ""}।` : `Done. I saved “${draft.title}”${project ? ` in ${project.name}` : ""}${draft.due_at ? ` for ${new Intl.DateTimeFormat(undefined, { timeZone: timezone, dateStyle: "medium", timeStyle: "short" }).format(new Date(draft.due_at))}` : ""}.`;
@@ -304,6 +307,7 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
           const response = await fetch("/api/backend/meetings", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ title: draft.title, description: draft.description, attendee_name: draft.attendee_name, starts_at: draft.starts_at, ends_at: draft.ends_at, timezone, location_type: locationType, location_label: place?.name ?? locationLabel, online_url: draft.online_url, saved_place_id: place?.id ?? null, reminder_minutes: draft.reminder_minutes ?? 60 }) });
           const data = await response.json().catch(() => ({}));
           if (!response.ok) throw new Error(data.message ?? "I couldn't save that meeting.");
+          savedLink = { href: `/app/calendar?date=${data.starts_at ? dayKey(data.starts_at) : dayKey(new Date())}`, label: "Open in calendar" };
           pendingVoiceCommandRef.current = "";
           await refreshAgenda();
           answer = inputLanguage === "hi-IN" ? `मीटिंग “${draft.title}” कैलेंडर में सेव कर दी है${place ? `, स्थान ${place.name}` : ""}। रिमाइंडर भी सेट है।` : `Done. I added “${draft.title}”${draft.attendee_name ? ` with ${draft.attendee_name}` : ""} to your calendar${place ? ` at ${place.name}` : locationLabel ? ` (${locationLabel})` : ""}, with a reminder.`;
@@ -311,7 +315,7 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
       }
     } catch (cause) { answer = cause instanceof Error ? cause.message : "I couldn't save that request."; }
     finally { setBusy(false); }
-    setMessages(current => [...current, { role: "assistant", content: answer }]);
+    setMessages(current => [...current, { role: "assistant", content: answer, ...(savedLink ? { link: savedLink } : {}) }]);
     return answer;
   }
 
@@ -338,7 +342,7 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
       <header className="assistant-corner-header"><span className="assistant-corner-avatar">✦</span><div><b>{assistantName}</b><small>Your personal assistant{agendaLoading ? "" : ` · ${timezone.replace("Asia/Kolkata", "India time").replace("Asia/Calcutta", "India time")}`}</small></div><button className="assistant-wake-toggle" onClick={() => voiceModeRef.current === "off" ? void startVoiceMode(true) : stopVoiceMode()} aria-label={voiceMode === "wake" ? "Stop wake word listening" : `Enable Hey ${assistantName} voice activation`}>{voiceMode === "wake" ? "Listening for name…" : `Hey ${assistantName}`}</button><button aria-label="Close assistant" onClick={closeAssistant}>×</button></header>
       <div className="assistant-corner-agenda"><b>Today’s schedule</b>{agendaLoading ? <small>Checking your calendar…</small> : agenda.length ? <ul>{agenda.slice(0, 5).map((item) => <li key={item.id}><time className={item.overdue ? "agenda-overdue" : undefined}>{item.overdue ? "Overdue" : friendlyTime(item.start_at, timezone)}</time><span><b>{item.title}</b><small>{item.kind === "meeting" ? "Meeting" : item.detail || "Task"}{item.detail && item.kind === "meeting" ? ` · ${item.detail}` : ""}</small></span></li>)}</ul> : <p>No special schedule saved today. Enjoy your free day, or ask me to plan something.</p>}</div>
       <div className="assistant-corner-messages" aria-live="polite">
-        {messages.map((item, index) => <article key={`${item.role}-${index}`} className={`assistant-corner-message assistant-corner-${item.role}`}><p>{item.content}</p>{item.sources?.length ? <div className="assistant-corner-sources"><b>Sources</b>{item.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer">{source.title} ↗</a>)}</div> : null}{item.role === "assistant" && <button className="assistant-read-aloud" onClick={() => speak(item.content)} aria-label="Read this answer aloud">▶ Listen</button>}</article>)}
+        {messages.map((item, index) => <article key={`${item.role}-${index}`} className={`assistant-corner-message assistant-corner-${item.role}`}><p>{item.content}</p>{item.link && <Link className="assistant-corner-link" href={item.link.href}>{item.link.label} →</Link>}{item.sources?.length ? <div className="assistant-corner-sources"><b>Sources</b>{item.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer">{source.title} ↗</a>)}</div> : null}{item.role === "assistant" && <button className="assistant-read-aloud" onClick={() => speak(item.content)} aria-label="Read this answer aloud">▶ Listen</button>}</article>)}
         {busy && <div className="assistant-corner-thinking"><span/><span/><span/> Searching and thinking…</div>}
         <div ref={chatEnd}/>
       </div>

@@ -28,7 +28,7 @@ class AuthController extends Controller
 
         [$workspace, $user] = DB::transaction(function () use ($data): array {
             $workspace = Workspace::create(['name' => $data['name']."'s workspace", 'slug' => Str::slug($data['name']).'-'.Str::lower(Str::random(8))]);
-            $user = User::create(['workspace_id' => $workspace->id, 'name' => $data['name'], 'email' => $data['email'], 'password' => $data['password'], 'timezone' => $data['timezone'] ?? 'UTC', 'locale' => $data['locale'] ?? 'en', 'status' => 'active', 'approval_status' => 'pending', 'profile_visibility' => 'workspace']);
+            $user = User::create(['workspace_id' => $workspace->id, 'name' => $data['name'], 'email' => $data['email'], 'password' => $data['password'], 'timezone' => ($data['timezone'] ?? null) && $data['timezone'] !== 'UTC' ? $data['timezone'] : 'Asia/Kolkata', 'locale' => $data['locale'] ?? 'en', 'status' => 'active', 'approval_status' => 'pending', 'profile_visibility' => 'workspace']);
             UserPreference::create(['user_id' => $user->id, 'theme' => ['mode' => 'system', 'font_family' => 'system', 'font_size' => 16, 'colors' => []], 'notify_in_app' => true, 'notify_email' => true, 'notify_browser' => false, 'notification_rules' => []]);
             $ownerRole = Role::create(['workspace_id' => $workspace->id, 'name' => 'workspace_owner', 'description' => 'Owner of this workspace', 'is_system' => true]);
             UserRole::create(['workspace_id' => $workspace->id, 'user_id' => $user->id, 'role_id' => $ownerRole->id]);

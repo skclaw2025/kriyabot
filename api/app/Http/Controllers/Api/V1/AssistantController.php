@@ -114,7 +114,7 @@ class AssistantController extends Controller
         });
         if(!$user->hasRole('workspace_owner'))$tasks->where(fn(Builder $q)=>$q->where('created_by',$user->id)->orWhereHas('assignees',fn(Builder $a)=>$a->where('users.id',$user->id))->orWhereHas('project.members',fn(Builder $m)=>$m->where('users.id',$user->id)));
         $agenda=$tasks->with('project:id,name')->get()->map(fn(Task $task)=>[
-            'id'=>'task-'.$task->id,'start_at'=>$task->start_at?->timezone($timezone)->toIso8601String() ?? $task->due_at?->timezone($timezone)->toIso8601String(),
+            'id'=>'task-'.$task->id,'start_at'=>(($task->due_at && $task->due_at->between($dayStart,$dayEnd)) ? $task->due_at : ($task->start_at ?? $task->due_at))?->copy()->timezone($timezone)->toIso8601String(),
             'title'=>$task->title,'kind'=>'task','phase'=>$task->status==='done'?'completed':'plan','overdue'=>$task->due_at && $task->due_at->lt(now($timezone)->startOfDay()),'detail'=>$task->project?->name ?? 'Personal task','status'=>$task->status,
         ])->all();
         $meetings=Meeting::where('workspace_id',$user->workspace_id)->where('created_by',$user->id)->where('status','scheduled')->whereBetween('starts_at',[$dayStart,$dayEnd])->get();
@@ -125,7 +125,6 @@ class AssistantController extends Controller
 
     private function userTimezone(User $user): string
     {
-        $timezone=$user->timezone ?: config('app.timezone');
-        return in_array($timezone,['Asia/Calcutta','Asia/Kolkatta'],true)?'Asia/Kolkata':$timezone;
+        return \App\Support\UserTime::zone($user);
     }
 }

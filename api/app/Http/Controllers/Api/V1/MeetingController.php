@@ -5,6 +5,7 @@ use App\Models\Meeting;
 use App\Models\SavedPlace;
 use App\Models\TaskflowReminder;
 use App\Services\AuditLogger;
+use App\Support\UserTime;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -16,7 +17,7 @@ class MeetingController extends Controller
     public function store(Request $request, AuditLogger $audit)
     {
         $user=$request->user(); $d=$request->validate(['title'=>['required','string','max:240'],'description'=>['nullable','string','max:10000'],'attendee_name'=>['nullable','string','max:180'],'starts_at'=>['required','date'],'ends_at'=>['required','date','after:starts_at'],'timezone'=>['required','timezone'],'location_type'=>['required',Rule::in(['office','saved_place','online','custom'])],'location_label'=>['nullable','string','max:180'],'location_details'=>['nullable','string','max:2000'],'online_url'=>['nullable','url','max:2000'],'saved_place_id'=>['nullable','integer',Rule::exists('saved_places','id')->where(fn($q)=>$q->where('workspace_id',$user->workspace_id)->where('user_id',$user->id))],'reminder_minutes'=>['nullable','integer','min:0','max:10080']]);
-        $d['starts_at']=Carbon::parse($d['starts_at'])->utc();$d['ends_at']=Carbon::parse($d['ends_at'])->utc();
+        $d['starts_at']=UserTime::parse($d['starts_at'],$user);$d['ends_at']=UserTime::parse($d['ends_at'],$user);
         if($d['location_type']==='saved_place'){$place=SavedPlace::where('workspace_id',$user->workspace_id)->where('user_id',$user->id)->findOrFail($d['saved_place_id'] ?? 0);$d['location_label']=$place->name;$d['location_details']=$place->address;}else{$d['saved_place_id']=null;}
         if($d['location_type']==='online' && empty($d['online_url'])) return response()->json(['message'=>'Add the meeting link.'],422);
         if($d['location_type']==='office' && empty($d['location_label'])) $d['location_label']='Office';
