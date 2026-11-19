@@ -15,7 +15,7 @@ class User extends Authenticatable implements MustVerifyEmail
     use HasApiTokens, HasFactory, MustVerifyEmailTrait, Notifiable, SoftDeletes;
 
     protected $fillable = ['workspace_id', 'name', 'job_title', 'department', 'phone', 'location', 'bio', 'email', 'password', 'status', 'approval_status', 'approved_at', 'approved_by', 'timezone', 'locale', 'profile_visibility', 'two_factor_enabled', 'two_factor_secret'];
-    protected $hidden = ['password', 'remember_token', 'two_factor_secret', 'two_factor_recovery_codes'];
+    protected $hidden = ['password', 'remember_token', 'two_factor_secret', 'two_factor_recovery_codes', 'calendar_feed_token'];
     protected $casts = ['email_verified_at' => 'datetime', 'approved_at' => 'datetime', 'password' => 'hashed', 'two_factor_enabled' => 'boolean', 'two_factor_secret' => 'encrypted', 'two_factor_recovery_codes' => 'encrypted:array'];
 
     public function workspace() { return $this->belongsTo(Workspace::class); }

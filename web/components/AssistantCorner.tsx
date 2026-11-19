@@ -9,7 +9,7 @@ import { resolveAssistantVoice, type AssistantVoiceId } from "@/lib/assistant-vo
 
 type AgendaItem = { id: string; title: string; kind: string; phase?: string; start?: string; start_at?: string; detail?: string; status?: string; overdue?: boolean };
 type ChatMessage = { role: "user" | "assistant"; content: string; sources?: Array<{ url: string; title: string }>; link?: { href: string; label: string } };
-type AssistantDraft = { kind: "task" | "meeting" | "clarification"; title?: string; description?: string | null; project_name?: string | null; priority?: string; due_at?: string | null; starts_at?: string | null; ends_at?: string | null; attendee_name?: string | null; reminder_minutes?: number | null; location_type?: string | null; location_label?: string | null; online_url?: string | null; saved_place_id?: number | null; clarification?: string | null; reply?: string | null };
+type AssistantDraft = { kind: "task" | "meeting" | "finance" | "clarification"; finance_type?: "income" | "expense" | null; amount?: number | null; entry_date?: string | null; party?: string | null; payment_method?: string | null; head_id?: number | null; head_name?: string | null; suggested_head?: string | null; title?: string; description?: string | null; project_name?: string | null; priority?: string; due_at?: string | null; starts_at?: string | null; ends_at?: string | null; attendee_name?: string | null; reminder_minutes?: number | null; location_type?: string | null; location_label?: string | null; online_url?: string | null; saved_place_id?: number | null; clarification?: string | null; reply?: string | null };
 type ProjectOption = { id: number; name: string };
 type PlaceOption = { id: number; name: string };
 type Props = { userName: string; initialAssistantName?: string; initialAssistantLanguage?: "en-IN" | "hi-IN" };
@@ -79,6 +79,7 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
   const voiceModeRef = useRef<"off" | "wake" | "command">("off");
   const voiceReplyRef = useRef(false);
   const wakeSessionRef = useRef(false);
+  const pendingClashRef = useRef<{ title: string; body: Record<string, unknown> } | null>(null);
   const pendingVoiceCommandRef = useRef("");
   const wakeGreetingRef = useRef(false);
 
@@ -276,15 +277,42 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
     setMessages(conversation); setBusy(true); setError("");
     let answer = "";
     let savedLink: { href: string; label: string } | null = null;
+    const clashDraft = pendingClashRef.current;
+    if (clashDraft) {
+      pendingClashRef.current = null;
+      if (/\b(save anyway|yes|ok(ay)?|keep both|haan|ha|theek)\b/i.test(command)) {
+        try {
+          const response = await fetch("/api/backend/meetings", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ ...clashDraft.body, confirm_conflict: true }) });
+          const data = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(data.message ?? "I couldn't save that meeting.");
+          await refreshAgenda();
+          answer = `Saved “${clashDraft.title}” even though it overlaps. I’ll remind you before both.`;
+          savedLink = { href: `/app/calendar?date=${data.starts_at ? dayKey(data.starts_at) : dayKey(new Date())}`, label: "Open in calendar" };
+        } catch (cause) { answer = cause instanceof Error ? cause.message : "I couldn't save that meeting."; }
+        setBusy(false);
+        setMessages(current => [...current, { role: "assistant", content: answer, ...(savedLink ? { link: savedLink } : {}) }]);
+        return answer;
+      }
+    }
     try {
       const parseCommand = pendingVoiceCommandRef.current ? `Continue the same request. Original request: ${pendingVoiceCommandRef.current}. The user is answering your clarification: ${command}. Update and return the original task or meeting.` : command;
       const parsedResponse = await fetch("/api/backend/assistant/parse", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ command: parseCommand, input_language: inputLanguage }) });
       const parsedData = await parsedResponse.json();
       if (!parsedResponse.ok) throw new Error(parsedData.message ?? "I couldn't understand that request.");
       const draft: AssistantDraft = parsedData.draft;
-      if (draft.kind === "clarification" || !draft.title?.trim()) {
+      if (draft.kind === "clarification" || (draft.kind === "finance" ? !(Number(draft.amount) > 0) : !draft.title?.trim())) {
         pendingVoiceCommandRef.current = pendingVoiceCommandRef.current || command;
         answer = draft.clarification || draft.reply || (inputLanguage === "hi-IN" ? "कृपया थोड़ा और विवरण बताइए।" : "I need one more detail before I can save that. Please tell me more.");
+      } else if (draft.kind === "finance") {
+        const response = await fetch("/api/backend/finance/entries", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ type: draft.finance_type === "income" ? "income" : "expense", amount: Number(draft.amount), entry_date: draft.entry_date, head_id: draft.head_id ?? null, party: draft.party ?? null, payment_method: draft.payment_method ?? null, description: draft.title || draft.description || null, source: "assistant" }) });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.message ?? "I couldn't save that entry.");
+        savedLink = { href: `/app/finance?entry=${data.id}`, label: "Open entry" };
+        pendingVoiceCommandRef.current = "";
+        const amountText = `₹${Number(draft.amount).toLocaleString("en-IN")}`;
+        answer = inputLanguage === "hi-IN"
+          ? `${amountText} का ${draft.finance_type === "income" ? "आय" : "खर्च"} दर्ज कर दिया${data.head ? `, हेड ${data.head.name}` : ""}।`
+          : `Recorded ${draft.finance_type === "income" ? "income" : "an expense"} of ${amountText}${data.head ? ` under ${data.head.name}` : draft.suggested_head ? `. Tip: create a “${draft.suggested_head}” head in Finance` : ""}.`;
       } else if (draft.kind === "task") {
         const project = projects.find(item => item.name.toLocaleLowerCase() === (draft.project_name ?? "").toLocaleLowerCase());
         if (draft.project_name && !project) throw new Error(`I couldn't find “${draft.project_name}” in your projects. Open the assistant planner to choose the right project.`);
@@ -304,8 +332,17 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
           pendingVoiceCommandRef.current = pendingVoiceCommandRef.current || command;
           answer = draft.clarification || (inputLanguage === "hi-IN" ? "मीटिंग सेव करने से पहले समय और स्थान बताइए।" : "Please tell me the meeting time and location before I save it.");
         } else {
-          const response = await fetch("/api/backend/meetings", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ title: draft.title, description: draft.description, attendee_name: draft.attendee_name, starts_at: draft.starts_at, ends_at: draft.ends_at, timezone, location_type: locationType, location_label: place?.name ?? locationLabel, online_url: draft.online_url, saved_place_id: place?.id ?? null, reminder_minutes: draft.reminder_minutes ?? 60 }) });
+          const meetingBody = { title: draft.title, description: draft.description, attendee_name: draft.attendee_name, starts_at: draft.starts_at, ends_at: draft.ends_at, timezone, location_type: locationType, location_label: place?.name ?? locationLabel, online_url: draft.online_url, saved_place_id: place?.id ?? null, reminder_minutes: draft.reminder_minutes ?? 60 };
+          const response = await fetch("/api/backend/meetings", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify(meetingBody) });
           const data = await response.json().catch(() => ({}));
+          if (response.status === 409) {
+            pendingClashRef.current = { title: draft.title ?? "Meeting", body: meetingBody };
+            pendingVoiceCommandRef.current = "";
+            answer = `${data.message ?? "That overlaps another meeting."} Say “save anyway” to keep both, or tell me a new time.`;
+            setBusy(false);
+            setMessages(current => [...current, { role: "assistant", content: answer }]);
+            return answer;
+          }
           if (!response.ok) throw new Error(data.message ?? "I couldn't save that meeting.");
           savedLink = { href: `/app/calendar?date=${data.starts_at ? dayKey(data.starts_at) : dayKey(new Date())}`, label: "Open in calendar" };
           pendingVoiceCommandRef.current = "";

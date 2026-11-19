@@ -4,6 +4,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Project;
 use App\Models\Task;
 use App\Models\Meeting;
+use App\Models\ExternalEvent;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
 use Illuminate\Support\Carbon;
@@ -53,6 +54,20 @@ class CalendarController extends Controller
         $unscheduled = Task::where('workspace_id', $user->workspace_id)->whereNull('start_at')->whereNull('due_at')->whereNotIn('status', ['done', 'cancelled']);
         if (! $user->hasRole('workspace_owner')) $unscheduled->where(fn (Builder $q) => $q->where('created_by', $user->id)->orWhereHas('assignees', fn (Builder $a) => $a->where('users.id', $user->id))->orWhereHas('project.members', fn (Builder $m) => $m->where('users.id', $user->id)));
         $unscheduled = $unscheduled->with('project:id,name')->orderByDesc('priority')->orderBy('created_at')->limit(100)->get()->map(fn (Task $task) => ['id' => $task->id, 'title' => $task->title, 'status' => $task->status, 'priority' => $task->priority, 'project' => $task->project?->name ?? 'Personal task']);
+        // Imported Outlook / Google / iCloud events (read-only).
+        ExternalEvent::where('user_id', $user->id)->where('uid_hash', 'not like', 'kriyabot-%')->where('starts_at', '<', $toUtc)->where('ends_at', '>', $fromUtc)->with('source:id,name,color')->orderBy('starts_at')->get()
+            ->each(function (ExternalEvent $e) use (&$events, $tz, $localDate) {
+                $end = $e->all_day ? $e->ends_at->copy()->subSecond() : $e->ends_at;
+                $events[] = ['id' => 'external-'.$e->id, 'kind' => 'external', 'phase' => 'plan', 'start' => $localDate($e->starts_at), 'end' => $localDate($end), 'start_at' => $e->all_day ? null : $e->starts_at->copy()->timezone($tz)->toIso8601String(), 'end_at' => $e->all_day ? null : $e->ends_at->copy()->timezone($tz)->toIso8601String(), 'title' => $e->title, 'detail' => trim(($e->source?->name ?? 'Calendar').($e->location ? ' · '.$e->location : '')), 'status' => 'scheduled', 'url' => '/app/calendar?date='.$localDate($e->starts_at)];
+            });
+        // Flag timed items that overlap each other.
+        $timed = array_keys(array_filter($events, fn ($e) => in_array($e['kind'], ['meeting', 'external'], true) && ! empty($e['start_at'])));
+        foreach ($timed as $i) foreach ($timed as $j) {
+            if ($i >= $j) continue;
+            if (strtotime($events[$i]['start_at']) < strtotime($events[$j]['end_at']) && strtotime($events[$j]['start_at']) < strtotime($events[$i]['end_at'])) {
+                $events[$i]['clash'] = true; $events[$j]['clash'] = true;
+            }
+        }
         usort($events, fn ($a, $b) => [$a['start'], $a['kind'], $a['title']] <=> [$b['start'], $b['kind'], $b['title']]);
         return response()->json(['events' => $events, 'unscheduled' => $unscheduled, 'counts' => ['scheduled' => count(array_filter($events, fn ($event) => $event['phase'] === 'plan')), 'completed' => count(array_filter($events, fn ($event) => $event['phase'] === 'completed')), 'unscheduled' => $unscheduled->count()]]);
     }

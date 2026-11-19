@@ -117,6 +117,67 @@ class AiClient
         ];
     }
 
+    /**
+     * Read a bill, invoice or receipt (photo or PDF) and return structured fields.
+     * The model may only choose a head from the person's own list; otherwise it suggests a name.
+     *
+     * @param  array{income: string[], expense: string[]}  $heads
+     * @return array{ok: bool, data?: array, message?: string, status?: int}
+     */
+    public function extractBill(string $bytes, string $mime, array $heads, string $today, string $timezone): array
+    {
+        if ($this->provider() !== 'anthropic') {
+            return ['ok' => false, 'status' => 422, 'message' => 'Bill scanning uses Claude. Set KRIYABOT_AI_PROVIDER=anthropic and add ANTHROPIC_API_KEY.'];
+        }
+        $isPdf = $mime === 'application/pdf';
+        $block = $isPdf
+            ? ['type' => 'document', 'source' => ['type' => 'base64', 'media_type' => 'application/pdf', 'data' => base64_encode($bytes)]]
+            : ['type' => 'image', 'source' => ['type' => 'base64', 'media_type' => $mime, 'data' => base64_encode($bytes)]];
+
+        $list = fn (array $names) => $names ? implode(', ', array_map(fn ($n) => '"'.$n.'"', $names)) : '(none yet)';
+        $system = 'You read Indian bills, invoices, receipts, salary slips and payment screenshots (UPI, bank SMS) for a personal and office finance book. '
+            .'Today is '.$today.' ('.$timezone.'). Amounts are in INR unless the document clearly shows another currency. '
+            .'Decide whether money was paid out by the user (expense) or received by the user (income). A shop bill, invoice addressed to the user, fuel slip, utility bill or a UPI "paid to" screen is an expense; a payment received, salary credit, fee receipt issued by the user, or "received from" screen is income. '
+            .'amount is the final total actually payable or paid (grand total including tax, after discounts). Use digits only, no commas. '
+            .'entry_date is the bill/transaction date as YYYY-MM-DD; Indian dates are usually day-first (05/11/2026 = 5 November 2026). If no date is visible use today. '
+            .'bill_no is the invoice/bill/receipt/UTR/transaction number exactly as printed. party is the shop, company or person on the other side. '
+            .'description is a short summary of what was bought or received (max 120 characters). '
+            .'Expense heads available: '.$list($heads['expense']).'. Income heads available: '.$list($heads['income']).'. '
+            .'Set head_name to the single best matching head of the correct type, copied exactly, or null if none fits. If none fits, put a short sensible new head name in suggested_head (e.g. "Groceries", "Fuel", "Electricity"). '
+            .'If the image is not a bill, receipt or payment record, set document_kind to "not_a_bill". Never invent numbers you cannot read; use null and lower confidence instead.';
+
+        $nullable = fn (string $type, string $description) => ['type' => [$type, 'null'], 'description' => $description];
+        $schema = ['type' => 'object', 'properties' => [
+            'document_kind' => ['type' => 'string', 'enum' => ['bill', 'not_a_bill']],
+            'type' => ['type' => 'string', 'enum' => ['expense', 'income']],
+            'amount' => $nullable('number', 'Grand total in the currency shown'),
+            'tax_amount' => $nullable('number', 'Total GST/tax if shown'),
+            'currency' => ['type' => 'string', 'description' => 'ISO code, usually INR'],
+            'entry_date' => $nullable('string', 'YYYY-MM-DD'),
+            'bill_no' => $nullable('string', 'Invoice / bill / UTR number'),
+            'party' => $nullable('string', 'Vendor or payer name'),
+            'description' => $nullable('string', 'Short summary'),
+            'payment_method' => ['type' => ['string', 'null'], 'enum' => ['cash', 'upi', 'card', 'bank', 'cheque', 'other', null]],
+            'head_name' => $nullable('string', 'Exact existing head name or null'),
+            'suggested_head' => $nullable('string', 'New head name when none fits'),
+            'confidence' => ['type' => 'number', 'description' => '0 to 1: how sure you are about amount and date'],
+        ], 'required' => ['document_kind', 'type', 'amount', 'entry_date', 'confidence']];
+
+        $result = $this->anthropic([
+            'model' => config('taskflow.ai.model', 'claude-sonnet-5-5'),
+            'max_tokens' => 1024,
+            'system' => $system,
+            'messages' => [['role' => 'user', 'content' => [$block, ['type' => 'text', 'text' => 'Read this document and record it.']]]],
+            'tools' => [['name' => 'record_bill', 'description' => 'Record the bill details.', 'input_schema' => $schema]],
+            'tool_choice' => ['type' => 'tool', 'name' => 'record_bill'],
+        ], 60);
+        if (! $result['ok']) return $result;
+        $tool = collect($result['json']['content'] ?? [])->first(fn ($b) => ($b['type'] ?? '') === 'tool_use');
+        return is_array($tool['input'] ?? null)
+            ? ['ok' => true, 'data' => $tool['input']]
+            : ['ok' => false, 'status' => 502, 'message' => 'The bill could not be read. Try a clearer, well-lit photo.'];
+    }
+
     /** Claude requires the conversation to start with a user turn and alternate roles. */
     private function normaliseHistory(array $history): array
     {

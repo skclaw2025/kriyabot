@@ -15,9 +15,21 @@ function isAllowed(segments: string[], method: string): boolean {
     return false;
   }
   if (resource === "workspace") return segments.join("/") === "workspace/members" && method === "GET";
-  if (resource === "calendar") return segments.length === 1 && method === "GET";
-  if (resource === "assistant") return segments.length === 2 && id === "context" && method === "GET" || segments.length === 2 && ["parse", "ask"].includes(id ?? "") && method === "POST";
-  if (resource === "meetings") return segments.length === 1 && ["GET", "POST"].includes(method) || segments.length === 2 && isId(id) && method === "DELETE";
+  if (resource === "calendar") {
+    if (segments.length === 1) return method === "GET";
+    if (id === "sync") return segments.length === 2 && method === "GET" || segments.length === 3 && child === "rotate" && method === "POST";
+    if (id === "sources") return segments.length === 2 && method === "POST" || segments.length === 3 && isId(child) && method === "DELETE" || segments.length === 4 && isId(child) && childId === "refresh" && method === "POST";
+    return false;
+  }
+  if (resource === "assistant") return segments.length === 2 && ["context", "briefing"].includes(id ?? "") && method === "GET" || segments.length === 2 && ["parse", "ask"].includes(id ?? "") && method === "POST";
+  if (resource === "meetings") return segments.length === 1 && ["GET", "POST"].includes(method) || segments.length === 2 && id === "conflicts" && method === "POST" || segments.length === 2 && isId(id) && method === "DELETE";
+  if (resource === "finance") {
+    if (id === "heads") return segments.length === 2 && ["GET", "POST"].includes(method) || segments.length === 3 && isId(child) && ["PATCH", "DELETE"].includes(method);
+    if (id === "entries") return segments.length === 2 && ["GET", "POST"].includes(method) || segments.length === 3 && isId(child) && ["PATCH", "DELETE"].includes(method) || segments.length === 4 && isId(child) && childId === "receipt" && ["GET", "POST"].includes(method);
+    if (id === "summary" || id === "export") return segments.length === 2 && method === "GET";
+    if (id === "scan") return segments.length === 2 && method === "POST";
+    return false;
+  }
   if (resource === "saved-places") return segments.length === 1 && method === "POST" || segments.length === 2 && isId(id) && method === "DELETE";
   if (resource === "notifications") return segments.length === 1 && method === "GET" || segments.length === 3 && isId(id) && child === "read" && method === "POST" || segments.join("/") === "notifications/push/key" && method === "GET" || segments.join("/") === "notifications/push/subscriptions" && method === "POST" || segments.join("/") === "notifications/push/unsubscribe" && method === "POST";
   if (resource === "people") return segments.length === 1 && method === "GET";
@@ -98,3 +110,6 @@ export const GET = forward;
 export const POST = forward;
 export const PATCH = forward;
 export const DELETE = forward;
+
+// Bill scanning and AI replies can take longer than Vercel's default function timeout.
+export const maxDuration = 60;

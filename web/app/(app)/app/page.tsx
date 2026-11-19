@@ -5,17 +5,22 @@ import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { dueLabel } from "@/components/tasks/TaskList";
 import { Task, isClosed, readJson } from "@/components/tasks/types";
-import { currentHour, dayKey, formatLongToday, formatTime, fromLocalInput, isOverdue } from "@/lib/datetime";
+import { currentHour, dayKey, formatDate, formatLongToday, formatTime, fromLocalInput, isOverdue } from "@/lib/datetime";
+import { formatINR } from "@/lib/image";
 
 type Project = { id: number; name: string; status: string; tasks_count?: number; due_date?: string | null };
 type AgendaItem = { id: string; title: string; kind: string; start_at?: string; detail?: string; status?: string; overdue?: boolean };
 type Me = { name?: string };
+type BriefMeeting = { id: number; kind: string; title: string; time: string; where?: string | null; source: string };
+type Clash = { a: string; b: string; at: string };
+type Briefing = { today: { meetings: BriefMeeting[]; tasks_due: number; overdue: number; clashes: Clash[] }; tomorrow: { date: string; meetings: BriefMeeting[]; clashes: Clash[] }; finance_today: { entries: number; income: number; expense: number } };
 
 export default function HomePage() {
   const router = useRouter();
   const [tasks, setTasks] = useState<Task[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [agenda, setAgenda] = useState<AgendaItem[]>([]);
+  const [briefing, setBriefing] = useState<Briefing | null>(null);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -27,12 +32,14 @@ export default function HomePage() {
 
   const load = useCallback(async () => {
     try {
-      const [t, p, c, me] = await Promise.all([
+      const [t, p, c, me, b] = await Promise.all([
         fetch("/api/backend/tasks?per_page=200", { cache: "no-store" }),
         fetch("/api/backend/projects", { cache: "no-store" }),
         fetch("/api/backend/assistant/context", { cache: "no-store" }),
         fetch("/api/backend/me", { cache: "no-store" }),
+        fetch("/api/backend/assistant/briefing", { cache: "no-store" }),
       ]);
+      if (b.ok) setBriefing(await b.json().catch(() => null));
       const [taskData, projectData, contextData, meData] = await Promise.all([readJson<{ data?: Task[] }>(t), readJson<{ data?: Project[] }>(p), readJson<{ today_schedule?: AgendaItem[] }>(c), readJson<Me>(me)]);
       if (!t.ok) { setError(taskData.message ?? "Your workspace couldn’t be loaded."); return; }
       setTasks(taskData.data ?? []); setProjects(projectData.data ?? []); setAgenda(contextData.today_schedule ?? []); setName(meData.name ?? ""); setError("");
@@ -93,6 +100,8 @@ export default function HomePage() {
     </form>
     {quickNotice && <p className="kb-alert kb-alert-success" role="status">Added “{quickNotice.title}”{quickWhen !== "none" ? ` · due ${quickWhen} 6:00 pm` : ""}. <Link href={`/app/tasks?task=${quickNotice.id}`}>Open task →</Link></p>}
     {error && <p className="kb-alert kb-alert-error" role="alert">{error}</p>}
+
+    {briefing && <CheckIn briefing={briefing} />}
 
     <section className="kb-stats">
       <StatCard href="/app/tasks?view=overdue" label="Overdue" value={overdue.length} tone={overdue.length ? "danger" : undefined} loading={loading} />
@@ -161,4 +170,28 @@ function summarise(overdue: number, today: number, meetings: number) {
   if (today) parts.push(`${today} task${today === 1 ? "" : "s"} due today`);
   if (overdue) parts.push(`${overdue} overdue`);
   return parts.length ? `You have ${parts.join(", ")}.` : "Your day is clear. Add what matters next.";
+}
+
+/** Daily check-in: log today's money, see tomorrow's meetings, catch clashes early. */
+function CheckIn({ briefing }: { briefing: Briefing }) {
+  const money = briefing.finance_today;
+  const clashes = [...briefing.today.clashes.map(c => ({ ...c, day: "Today" })), ...briefing.tomorrow.clashes.map(c => ({ ...c, day: "Tomorrow" }))];
+  return <section className="kb-checkin" aria-label="Daily check-in">
+    <header className="kb-card-header" style={{ marginBottom: 0 }}><h2>Daily check-in</h2><Link href="/app/finance">Open finance →</Link></header>
+    {clashes.map((c, i) => <p key={i} className="kb-clash" role="alert">⚠ {c.day} at {c.at}: “{c.a}” overlaps “{c.b}”. <Link href={`/app/calendar?date=${c.day === "Today" ? dayKey(new Date()) : briefing.tomorrow.date}`}>Fix in calendar →</Link></p>)}
+    <div className="kb-checkin-grid">
+      <div className="kb-checkin-block">
+        <h3>Today’s money</h3>
+        {money.entries ? <p style={{ margin: 0, fontSize: 14 }}><span className="tone-income">+{formatINR(money.income)}</span> received · <span className="tone-expense">−{formatINR(money.expense)}</span> spent <small className="kb-hint">({money.entries} {money.entries === 1 ? "entry" : "entries"})</small></p>
+          : <p style={{ margin: 0, fontSize: 14 }}>Nothing logged today yet. Add what you spent and received.</p>}
+        <div className="kb-checkin-actions"><Link className="kb-button kb-button-primary kb-button-sm" href="/app/finance">📷 Scan bill</Link><Link className="kb-button kb-button-ghost kb-button-sm" href="/app/finance?add=expense">＋ Expense</Link><Link className="kb-button kb-button-ghost kb-button-sm" href="/app/finance?add=income">＋ Income</Link></div>
+      </div>
+      <div className="kb-checkin-block">
+        <h3>Tomorrow · {formatDate(`${briefing.tomorrow.date}`, "", { year: false })}</h3>
+        {briefing.tomorrow.meetings.length ? <ul>{briefing.tomorrow.meetings.slice(0, 5).map(m => <li key={`${m.kind}-${m.id}`}><time>{m.time}</time><span>{m.title}{m.where ? <small> · {m.where}</small> : null}{m.source !== "Kriyabot" ? <small> · {m.source}</small> : null}</span></li>)}</ul>
+          : <p style={{ margin: 0, fontSize: 14 }}>No meetings yet for tomorrow.</p>}
+        <div className="kb-checkin-actions"><Link className="kb-button kb-button-ghost kb-button-sm" href="/app/assistant">＋ Add a meeting</Link><Link className="kb-button kb-button-ghost kb-button-sm" href={`/app/calendar?date=${briefing.tomorrow.date}`}>View day</Link></div>
+      </div>
+    </div>
+  </section>;
 }

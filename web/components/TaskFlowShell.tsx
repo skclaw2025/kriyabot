@@ -16,6 +16,7 @@ const primaryLinks = [
   { href: "/app", label: "Home", icon: "overview" },
   { href: "/app/tasks", label: "My tasks", icon: "work" },
   { href: "/app/calendar", label: "Calendar", icon: "calendar" },
+  { href: "/app/finance", label: "Finance", icon: "finance" },
   { href: "/app/projects", label: "Projects", icon: "projects" },
   { href: "/app/assistant", label: "AI assistant", icon: "assistant" },
 ];
@@ -44,6 +45,7 @@ function Icon({ name }: { name: string }) {
     trash: <><path d="M4 7h16M10 11v6M14 11v6"/><path d="m5 7 1 13h12l1-13M9 7V4h6v3"/></>,
     assistant: <><path d="M12 3v3M5.6 5.6l2.1 2.1M3 12h3M18 12h3M16.2 7.7l2.1-2.1"/><path d="M8 14a4 4 0 1 1 8 0c0 2-1 2-1 4h-6c0-2-1-2-1-4ZM9 21h6"/></>,
     plus: <><path d="M12 5v14M5 12h14"/></>,
+    finance: <><rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M16 14.5h2"/><path d="M6 6V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/></>,
     search: <><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></>,
     menu: <><path d="M4 7h16M4 12h16M4 17h16"/></>,
   };

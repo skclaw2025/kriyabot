@@ -20,10 +20,14 @@ use App\Http\Controllers\Api\V1\MeetingController;
 use App\Http\Controllers\Api\V1\SavedPlaceController;
 use App\Http\Controllers\Api\V1\NotificationController;
 use App\Http\Controllers\Api\V1\AutomationController;
+use App\Http\Controllers\Api\V1\FinanceController;
+use App\Http\Controllers\Api\V1\CalendarSyncController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function (): void {
     Route::post('/automation/reminders', [AutomationController::class, 'dispatchReminders'])->middleware('throttle:2,1');
+    // Private calendar feed for phone calendars / Google / Outlook (token in the URL, no login).
+    Route::get('/calendar/feed/{token}', [CalendarSyncController::class, 'feed'])->where('token', '[A-Za-z0-9]{32,64}(\.ics)?')->middleware('throttle:60,1');
 
     Route::middleware('throttle:auth')->group(function (): void {
         Route::post('/register', [AuthController::class, 'register']);
@@ -47,7 +51,9 @@ Route::prefix('v1')->group(function (): void {
         Route::get('/assistant/context', [AssistantController::class, 'context']);
         Route::post('/assistant/parse', [AssistantController::class, 'parse'])->middleware('throttle:30,1');
         Route::post('/assistant/ask', [AssistantController::class, 'ask'])->middleware('throttle:20,1');
+        Route::get('/assistant/briefing', [AssistantController::class, 'briefing']);
         Route::get('/meetings', [MeetingController::class, 'index']);
+        Route::post('/meetings/conflicts', [MeetingController::class, 'conflicts']);
         Route::post('/meetings', [MeetingController::class, 'store']);
         Route::delete('/meetings/{meeting}', [MeetingController::class, 'destroy']);
         Route::post('/saved-places', [SavedPlaceController::class, 'store']);
@@ -66,6 +72,26 @@ Route::prefix('v1')->group(function (): void {
         Route::post('/files', [WorkspaceFileController::class, 'store']);
         Route::get('/files/{file}/preview', [WorkspaceFileController::class, 'preview']);
         Route::delete('/files/{file}', [WorkspaceFileController::class, 'destroy']);
+
+        Route::get('/calendar/sync', [CalendarSyncController::class, 'show']);
+        Route::post('/calendar/sync/rotate', [CalendarSyncController::class, 'rotate'])->middleware('throttle:5,1');
+        Route::post('/calendar/sources', [CalendarSyncController::class, 'storeSource'])->middleware('throttle:10,1');
+        Route::post('/calendar/sources/{source}/refresh', [CalendarSyncController::class, 'refreshSource'])->middleware('throttle:10,1');
+        Route::delete('/calendar/sources/{source}', [CalendarSyncController::class, 'destroySource']);
+
+        Route::get('/finance/heads', [FinanceController::class, 'heads']);
+        Route::post('/finance/heads', [FinanceController::class, 'storeHead']);
+        Route::patch('/finance/heads/{head}', [FinanceController::class, 'updateHead']);
+        Route::delete('/finance/heads/{head}', [FinanceController::class, 'destroyHead']);
+        Route::get('/finance/entries', [FinanceController::class, 'index']);
+        Route::get('/finance/summary', [FinanceController::class, 'summaryOnly']);
+        Route::get('/finance/export', [FinanceController::class, 'export']);
+        Route::post('/finance/entries', [FinanceController::class, 'store']);
+        Route::post('/finance/scan', [FinanceController::class, 'scan'])->middleware('throttle:20,1');
+        Route::patch('/finance/entries/{entry}', [FinanceController::class, 'update']);
+        Route::delete('/finance/entries/{entry}', [FinanceController::class, 'destroy']);
+        Route::post('/finance/entries/{entry}/receipt', [FinanceController::class, 'uploadReceipt']);
+        Route::get('/finance/entries/{entry}/receipt', [FinanceController::class, 'receipt']);
 
         Route::get('/trash', [TrashController::class, 'index']);
         Route::post('/trash/projects/{id}/restore', [TrashController::class, 'restoreProject']);
