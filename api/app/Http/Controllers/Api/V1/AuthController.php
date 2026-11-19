@@ -95,6 +95,10 @@ class AuthController extends Controller
         if ($user->markEmailAsVerified()) {
             $audit->record($request, 'auth.email_verified', $user);
         }
+        // People click this link from their inbox, so send browsers back to the app instead of showing raw JSON.
+        if (! $request->expectsJson()) {
+            return redirect()->away(rtrim((string) config('app.frontend_url'), '/').'/login?verified=1');
+        }
         return response()->json(['message' => 'Email verified. Account approval may still be pending.']);
     }
 

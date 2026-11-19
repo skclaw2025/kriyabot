@@ -6,7 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { resolveAssistantVoice, type AssistantVoiceId } from "@/lib/assistant-voice";
 
-type AgendaItem = { id: string; title: string; kind: string; phase?: string; start?: string; start_at?: string; detail?: string; status?: string };
+type AgendaItem = { id: string; title: string; kind: string; phase?: string; start?: string; start_at?: string; detail?: string; status?: string; overdue?: boolean };
 type ChatMessage = { role: "user" | "assistant"; content: string; sources?: Array<{ url: string; title: string }> };
 type AssistantDraft = { kind: "task" | "meeting" | "clarification"; title?: string; description?: string | null; project_name?: string | null; priority?: string; due_at?: string | null; starts_at?: string | null; ends_at?: string | null; attendee_name?: string | null; reminder_minutes?: number | null; location_type?: string | null; location_label?: string | null; online_url?: string | null; saved_place_id?: number | null; clarification?: string | null; reply?: string | null };
 type ProjectOption = { id: number; name: string };
@@ -44,7 +44,16 @@ function friendlyTime(value: string | undefined, zone: string) {
 }
 
 export function AssistantCorner({ userName, initialAssistantName, initialAssistantLanguage }: Props) {
-  const [open, setOpen] = useState(true);
+  // Open by itself only once per browser session; after that it stays where the person left it.
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    try {
+      if (!sessionStorage.getItem("kriyabot:assistant-auto-opened")) {
+        sessionStorage.setItem("kriyabot:assistant-auto-opened", "1");
+        if (window.matchMedia("(min-width: 900px)").matches) setOpen(true);
+      }
+    } catch { /* storage blocked: stay closed */ }
+  }, []);
   const [portalReady, setPortalReady] = useState(false);
   const [assistantName, setAssistantName] = useState(initialAssistantName || "Kriyabot Assistant");
   const [inputLanguage, setInputLanguage] = useState<"en-IN" | "hi-IN">(initialAssistantLanguage || "en-IN");
@@ -125,7 +134,7 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
     setAgendaLoading(true);
     try {
       const response = await fetch("/api/backend/assistant/context", { cache: "no-store" });
-      const context = await response.json();
+      const context = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(context.message ?? "Could not refresh today's schedule.");
       setTimezone(context.timezone || "UTC");
       setAssistantName(context.assistant_name || "Kriyabot Assistant");
@@ -252,8 +261,8 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
     const next = [...messages, { role: "user" as const, content: question }];
     setMessages(next); setDraft(""); setBusy(true); setError("");
     try {
-      const response = await fetch("/api/backend/assistant/ask", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ message: question, input_language: inputLanguage, history: next.slice(-9, -1).map(({ role, content }) => ({ role, content })) }) });
-      const data = await response.json();
+      const response = await fetch("/api/backend/assistant/ask", { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json" }, body: JSON.stringify({ message: question, input_language: inputLanguage, history: next.slice(-9, -1).map(({ role, content }) => ({ role, content: content.slice(0, 2000) })) }) });
+      const data = await response.json().catch(() => ({ message: response.status === 429 ? "You are asking very quickly. Please wait a few seconds." : "The assistant is not reachable right now. Please try again." }));
       if (!response.ok) throw new Error(data.message ?? "I could not answer that just now.");
       const answer = data.answer ?? "I don't have an answer for that yet.";
       setMessages((current) => [...current, { role: "assistant", content: answer, sources: data.sources ?? [] }]);
@@ -326,8 +335,8 @@ export function AssistantCorner({ userName, initialAssistantName, initialAssista
       <span className="assistant-corner-label">{assistantName}</span><i aria-hidden="true" />
     </button>
     {open && portalReady && createPortal(<section className="assistant-corner-panel" aria-label={`${assistantName} chat`}>
-      <header className="assistant-corner-header"><span className="assistant-corner-avatar">✦</span><div><b>{assistantName}</b><small>Your personal assistant · Today in {timezone}</small></div><button className="assistant-wake-toggle" onClick={() => voiceModeRef.current === "off" ? void startVoiceMode(true) : stopVoiceMode()} aria-label={voiceMode === "wake" ? "Stop wake word listening" : `Enable Hey ${assistantName} voice activation`}>{voiceMode === "wake" ? "Listening for name…" : `Hey ${assistantName}`}</button><button aria-label="Close assistant" onClick={closeAssistant}>×</button></header>
-      <div className="assistant-corner-agenda"><b>Today’s schedule</b>{agendaLoading ? <small>Checking your calendar…</small> : agenda.length ? <ul>{agenda.slice(0, 5).map((item) => <li key={item.id}><time>{friendlyTime(item.start_at, timezone)}</time><span><b>{item.title}</b><small>{item.kind === "meeting" ? "Meeting" : item.detail || "Task"}{item.detail && item.kind === "meeting" ? ` · ${item.detail}` : ""}</small></span></li>)}</ul> : <p>No special schedule saved today. Enjoy your free day, or ask me to plan something.</p>}</div>
+      <header className="assistant-corner-header"><span className="assistant-corner-avatar">✦</span><div><b>{assistantName}</b><small>Your personal assistant{agendaLoading ? "" : ` · ${timezone.replace("Asia/Kolkata", "India time").replace("Asia/Calcutta", "India time")}`}</small></div><button className="assistant-wake-toggle" onClick={() => voiceModeRef.current === "off" ? void startVoiceMode(true) : stopVoiceMode()} aria-label={voiceMode === "wake" ? "Stop wake word listening" : `Enable Hey ${assistantName} voice activation`}>{voiceMode === "wake" ? "Listening for name…" : `Hey ${assistantName}`}</button><button aria-label="Close assistant" onClick={closeAssistant}>×</button></header>
+      <div className="assistant-corner-agenda"><b>Today’s schedule</b>{agendaLoading ? <small>Checking your calendar…</small> : agenda.length ? <ul>{agenda.slice(0, 5).map((item) => <li key={item.id}><time className={item.overdue ? "agenda-overdue" : undefined}>{item.overdue ? "Overdue" : friendlyTime(item.start_at, timezone)}</time><span><b>{item.title}</b><small>{item.kind === "meeting" ? "Meeting" : item.detail || "Task"}{item.detail && item.kind === "meeting" ? ` · ${item.detail}` : ""}</small></span></li>)}</ul> : <p>No special schedule saved today. Enjoy your free day, or ask me to plan something.</p>}</div>
       <div className="assistant-corner-messages" aria-live="polite">
         {messages.map((item, index) => <article key={`${item.role}-${index}`} className={`assistant-corner-message assistant-corner-${item.role}`}><p>{item.content}</p>{item.sources?.length ? <div className="assistant-corner-sources"><b>Sources</b>{item.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noopener noreferrer">{source.title} ↗</a>)}</div> : null}{item.role === "assistant" && <button className="assistant-read-aloud" onClick={() => speak(item.content)} aria-label="Read this answer aloud">▶ Listen</button>}</article>)}
         {busy && <div className="assistant-corner-thinking"><span/><span/><span/> Searching and thinking…</div>}

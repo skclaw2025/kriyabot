@@ -55,16 +55,35 @@ async function forward(request: NextRequest, context: Context) {
   const incomingType = request.headers.get("Content-Type");
   const isMultipart = incomingType?.toLowerCase().startsWith("multipart/form-data") ?? false;
   const body = method === "GET" || method === "DELETE" ? undefined : isMultipart ? await request.arrayBuffer() : await request.text();
-  const upstream = await fetch(`${apiBase()}/${segments.map(encodeURIComponent).join("/")}${request.nextUrl.search}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/json, application/pdf, image/jpeg, image/png, image/webp, */*",
-      ...(body === undefined ? {} : { "Content-Type": incomingType ?? "application/json" }),
-    },
-    body,
-    cache: "no-store",
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${apiBase()}/${segments.map(encodeURIComponent).join("/")}${request.nextUrl.search}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json, application/pdf, image/jpeg, image/png, image/webp, */*",
+        ...(body === undefined ? {} : { "Content-Type": incomingType ?? "application/json" }),
+      },
+      body,
+      cache: "no-store",
+    });
+  } catch {
+    return NextResponse.json({ message: "The Kriyabot server is not reachable right now. Please try again shortly." }, { status: 502 });
+  }
+
+  // Pages call response.json(); never hand them an HTML error page.
+  const upstreamType = upstream.headers.get("Content-Type") ?? "";
+  if (!upstream.ok && !upstreamType.includes("application/json")) {
+    const friendly: Record<number, string> = {
+      401: "Your session has ended. Please sign in again.",
+      403: "You do not have access to this item.",
+      404: "This item could not be found.",
+      413: "That file is too large to upload.",
+      419: "Your session has ended. Please sign in again.",
+      429: "Too many requests. Please wait a few seconds and try again.",
+    };
+    return NextResponse.json({ message: friendly[upstream.status] ?? "Something went wrong on the server. Please try again." }, { status: upstream.status });
+  }
 
   const headers = new Headers({ "Content-Type": upstream.headers.get("Content-Type") ?? "application/json", "Cache-Control": "private, no-store" });
   for (const name of ["Content-Disposition", "Content-Length", "X-Content-Type-Options", "Content-Security-Policy"]) {

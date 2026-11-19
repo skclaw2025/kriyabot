@@ -11,7 +11,7 @@ class ProfileController extends Controller
 {
     public function show(Request $request)
     {
-        return response()->json($request->user()->load('preferences', 'roleAssignments.role:id,name')->makeHidden(['two_factor_secret', 'two_factor_recovery_codes']));
+        return response()->json($request->user()->load('preferences', 'roleAssignments.role:id,name', 'workspace:id,name')->makeHidden(['two_factor_secret', 'two_factor_recovery_codes']));
     }
 
     public function update(Request $request, AuditLogger $audit)

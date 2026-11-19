@@ -3,11 +3,19 @@
 return [
     // Used only by the shared-hosting HTTP scheduler endpoint. Keep this secret private.
     'scheduler_token' => env('TASKFLOW_SCHEDULER_TOKEN'),
-    'ai' => ['api_key' => env('OPENAI_API_KEY'), 'model' => env('OPENAI_MODEL', 'gpt-4.1-mini')],
+    // AI provider: 'anthropic' (Claude, default) or 'openai' (fallback).
+    'ai' => [
+        'provider' => env('KRIYABOT_AI_PROVIDER', 'anthropic'),
+        'anthropic_key' => env('ANTHROPIC_API_KEY'),
+        'model' => env('ANTHROPIC_MODEL', 'claude-sonnet-5-5'),        // conversational answers + web search
+        'fast_model' => env('ANTHROPIC_FAST_MODEL', 'claude-haiku-5-5'), // command -> task/meeting drafts
+        'openai_key' => env('OPENAI_API_KEY'),
+        'openai_model' => env('OPENAI_MODEL', 'gpt-4.1-mini'),
+    ],
     'push' => [
         'vapid_public_key' => env('TASKFLOW_VAPID_PUBLIC_KEY'),
         'vapid_private_key' => env('TASKFLOW_VAPID_PRIVATE_KEY'),
-        'vapid_subject' => env('TASKFLOW_VAPID_SUBJECT', 'mailto:noreply@taskflow.local'),
+        'vapid_subject' => env('TASKFLOW_VAPID_SUBJECT', 'mailto:noreply@kriyabot.local'),
     ],
     'trash' => ['retention_days' => 10],
     'uploads' => [

@@ -9,7 +9,7 @@ import { AccountMenu } from "@/components/AccountMenu";
 import { AssistantCorner } from "@/components/AssistantCorner";
 
 type Theme = { font_family?: string; font_size?: number; colors?: Record<string, string> };
-type Props = { user: { name?: string; email?: string; role_assignments?: Array<{ role?: { name?: string } }>; preferences?: { theme?: Theme; notify_browser?: boolean; assistant_name?: string; assistant_language?: "en-IN" | "hi-IN"; avatar?: string | null } } };
+type Props = { user: { name?: string; email?: string; workspace?: { name?: string } | null; role_assignments?: Array<{ role?: { name?: string } }>; preferences?: { theme?: Theme; notify_browser?: boolean; assistant_name?: string; assistant_language?: "en-IN" | "hi-IN"; avatar?: string | null } } };
 const links = [
   { href: "/app", label: "Overview", icon: "overview" },
   { href: "/app/tasks", label: "My work", icon: "work", badge: "" },
@@ -62,13 +62,15 @@ export function TaskFlowShell({ children, user }: React.PropsWithChildren<Props>
     "--tf-font-family": fontFamilies[theme.font_family ?? "system"] ?? fontFamilies.system,
     "--tf-font-scale": String(((theme.font_size ?? 16) / 16) * 1.16),
   } as CSSProperties;
+  const workspaceName = user.workspace?.name?.trim() || "My workspace";
+  const workspaceInitial = (workspaceName.match(/[A-Za-z0-9]/)?.[0] ?? "K").toUpperCase();
   const initials = (user.name ?? user.email ?? "TF").split(/[\s@._-]+/).filter(Boolean).slice(0, 2).map(part => part[0]).join("").toUpperCase();
   return <div className="app-frame" style={themeStyle}>
     {mobileOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)} />}
     <aside className={`sidebar ${mobileOpen ? "sidebar-open" : ""}`}>
       <Link className="brand-lockup" href="/app" onClick={() => setMobileOpen(false)} aria-label="Kriyabot home"><img src="/kriyabot-logo.png" alt="Kriyabot" /></Link>
       <div className="sidebar-scroll">
-        <div className="workspace-switcher"><span className="workspace-avatar">W</span><span className="workspace-label"><b>Workspace</b><small>Current workspace</small></span><span className="switch-caret">⌄</span></div>
+        <div className="workspace-switcher"><span className="workspace-avatar">{workspaceInitial}</span><span className="workspace-label"><b title={workspaceName}>{workspaceName}</b><small>Personal workspace</small></span></div>
         <p className="nav-caption">WORKSPACE</p>
         <nav className="nav-list" aria-label="Workspace navigation">{links.map(item => { const active = item.href === "/app" ? pathname === item.href : pathname.startsWith(item.href); return <Link key={item.href} href={item.href} onClick={() => setMobileOpen(false)} className={`nav-link ${active ? "nav-link-active" : ""}`} aria-current={active ? "page" : undefined}><Icon name={item.icon}/><span>{item.label}</span>{active && <span className="active-indicator"/>}</Link>; })}</nav>
         <p className="nav-caption nav-caption-spaced">COLLABORATE</p>
@@ -77,7 +79,7 @@ export function TaskFlowShell({ children, user }: React.PropsWithChildren<Props>
         <div className="help-card"><span className="help-spark">✦</span><b>One step at a time</b><p>Keep your next priority close and your bigger goals in view.</p><Link href="/app/tasks" onClick={() => setMobileOpen(false)}>Open my work <span>→</span></Link></div>
       </div>
     </aside>
-      <div className="app-main"><header className="app-topbar"><button className="mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><span/><span/><span/></button><Link className="mobile-brand" href="/app" aria-label="Kriyabot home"><img src="/kriyabot-logo.png" alt="Kriyabot"/></Link><div className="breadcrumb"><span>Workspace</span><span className="breadcrumb-slash">/</span><b>{pathname === "/app" ? "Overview" : pathname.startsWith("/admin") ? "Users" : links.find(item => item.href !== "/app" && pathname.startsWith(item.href))?.label ?? collaborationLinks.find(item => pathname.startsWith(item.href))?.label ?? "Workspace"}</b></div><div className="topbar-right"><AssistantCorner userName={user.name ?? "there"} initialAssistantName={user.preferences?.assistant_name} initialAssistantLanguage={user.preferences?.assistant_language}/><NotificationBell enabled={!!user.preferences?.notify_browser}/><span className="status-pill"><span/> Workspace ready</span><AccountMenu name={user.name} email={user.email} avatar={user.preferences?.avatar}/></div></header><main className="main-content">{children}</main></div>
+      <div className="app-main"><header className="app-topbar"><button className="mobile-menu-button" aria-label="Open navigation" onClick={() => setMobileOpen(true)}><span/><span/><span/></button><Link className="mobile-brand" href="/app" aria-label="Kriyabot home"><img src="/kriyabot-logo.png" alt="Kriyabot"/></Link><div className="breadcrumb"><span>Kriyabot</span><span className="breadcrumb-slash">/</span><b>{pathname === "/app" ? "Overview" : pathname.startsWith("/admin") ? "Users" : links.find(item => item.href !== "/app" && pathname.startsWith(item.href))?.label ?? collaborationLinks.find(item => pathname.startsWith(item.href))?.label ?? (pathname.startsWith("/app/profile") ? "Profile & preferences" : "Workspace")}</b></div><div className="topbar-right"><AssistantCorner userName={user.name ?? "there"} initialAssistantName={user.preferences?.assistant_name} initialAssistantLanguage={user.preferences?.assistant_language}/><NotificationBell enabled={!!user.preferences?.notify_browser}/><AccountMenu name={user.name} email={user.email} avatar={user.preferences?.avatar}/></div></header><main className="main-content">{children}</main></div>
   </div>;
 }
 

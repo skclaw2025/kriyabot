@@ -8,9 +8,7 @@ use App\Models\Meeting;
 use App\Models\User;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Http;
-use Illuminate\Support\Facades\Log;
-use Illuminate\Http\Client\ConnectionException;
+use App\Services\AiClient;
 
 class AssistantController extends Controller
 {
@@ -20,7 +18,7 @@ class AssistantController extends Controller
         return response()->json([
             'projects'=>Project::where('workspace_id',$user->workspace_id)->where(fn($q)=>$q->where('created_by',$user->id)->orWhereHas('members',fn($m)=>$m->where('users.id',$user->id)))->orderBy('name')->get(['id','name']),
             'places'=>SavedPlace::where('workspace_id',$user->workspace_id)->where('user_id',$user->id)->orderBy('name')->get(['id','name','kind','address']),
-            'timezone'=>$this->userTimezone($user), 'today_schedule'=>$this->todaySchedule($user), 'configured'=>filled(config('taskflow.ai.api_key')),
+            'timezone'=>$this->userTimezone($user), 'today_schedule'=>$this->todaySchedule($user), 'configured'=>app(AiClient::class)->configured(),
             'assistant_name'=>$user->preferences?->assistant_name ?: 'Kriyabot Assistant',
             'assistant_voice'=>$user->preferences?->assistant_voice ?: 'india_female_warm',
             'assistant_language'=>$user->preferences?->assistant_language ?: ($user->locale === 'hi' ? 'hi-IN' : 'en-IN'),
@@ -28,77 +26,80 @@ class AssistantController extends Controller
         ]);
     }
 
-    public function parse(Request $request)
+    public function parse(Request $request, AiClient $ai)
     {
-        $data=$request->validate(['command'=>['required','string','max:2000'],'input_language'=>['sometimes','in:en-IN,hi-IN']]);
-        $user=$request->user(); $timezone=$this->userTimezone($user); $projects=Project::where('workspace_id',$user->workspace_id)->where(fn($q)=>$q->where('created_by',$user->id)->orWhereHas('members',fn($m)=>$m->where('users.id',$user->id)))->pluck('name');
+        $data=$request->validate(['command'=>['required','string','max:6000'],'input_language'=>['sometimes','in:en-IN,hi-IN']]);
+        $user=$request->user(); $timezone=$this->userTimezone($user);
+        $projects=Project::where('workspace_id',$user->workspace_id)->where(fn($q)=>$q->where('created_by',$user->id)->orWhereHas('members',fn($m)=>$m->where('users.id',$user->id)))->pluck('name');
         $places=SavedPlace::where('workspace_id',$user->workspace_id)->where('user_id',$user->id)->get(['id','name','kind','address']);
-        $key=config('taskflow.ai.api_key');
-        if (! $key) return response()->json(['message'=>'The AI assistant is not configured yet. Add OPENAI_API_KEY to the API .env file, then restart Laravel.'],422);
+        if (! $ai->configured()) return response()->json(['message'=>$ai->notConfiguredMessage()],422);
+
         $languageInstruction = ($data['input_language'] ?? 'en-IN') === 'hi-IN'
-            ? 'The user spoke Hindi. Understand and translate the command into English before extracting its intent. Return title, description, project_name, attendee_name, and location_label in English so saved records are in English. Write reply and clarification in natural Hindi (Devanagari).'
+            ? 'The user spoke Hindi. Understand and translate the command into English before extracting its intent. Return title, description, project_name, attendee_name and location_label in English so saved records are in English. Write reply and clarification in natural Hindi (Devanagari).'
             : 'The user spoke Indian English. Return all draft fields and replies in English.';
-        $prompt="Interpret one Kriyabot command as a task or meeting draft. ".$languageInstruction." Never claim you created anything. Return JSON only with keys: kind (task|meeting|clarification), reply, title, description, project_name, priority (low|normal|high|urgent), due_at (ISO 8601 or null), starts_at (ISO 8601 or null), ends_at (ISO 8601 or null), attendee_name, reminder_minutes (integer or null), location_type (office|saved_place|online|custom|null), location_label, online_url, clarification. Current local time is ".now($timezone)->toIso8601String()." and timezone is ".$timezone.". If date lacks year choose next future occurrence. A meeting without end time lasts one hour. If the user requests a task reminder but gives no due date, ask for the due date. Use a clarification if required details cannot be inferred. Existing projects: ".$projects->implode(', ').". Saved places (use exact name as location_label when selected): ".$places->map(fn($p)=>$p->name.' ('.$p->kind.')')->implode(', ').". User command: ".$data['command'];
-        try{$response=Http::withToken($key)->timeout(35)->post('https://api.openai.com/v1/responses',[
-            'model'=>config('taskflow.ai.model','gpt-4.1-mini'),'store'=>false,'input'=>$prompt,
-            'text'=>['format'=>['type'=>'json_object']],
-        ]);}catch(ConnectionException $e){$detail=$e->getMessage();Log::error('Kriyabot AI connection failed',['error'=>$detail]);$hint=str_contains(strtolower($detail),'certificate')||str_contains(strtolower($detail),'ssl')?'The API server could not verify the AI service TLS certificate. Check PHP/OpenSSL certificates and system time.':(str_contains(strtolower($detail),'getaddrinfo')||str_contains(strtolower($detail),'resolve')?'The API server could not resolve api.openai.com. Check DNS and outbound internet access.':'The API server could not connect to api.openai.com. Check outbound HTTPS access and try again.');return response()->json(['message'=>$hint],502);}catch(\Throwable $e){Log::error('Kriyabot AI request failed',['type'=>get_class($e),'error'=>$e->getMessage()]);return response()->json(['message'=>'The API server failed while contacting the AI service. Check storage/logs/laravel.log for the underlying error.'],502);}
-        if (! $response->successful()) {$status=$response->status();$providerMessage=(string)data_get($response->json(),'error.message','');$providerCode=(string)data_get($response->json(),'error.code','');Log::warning('Kriyabot AI service returned an error',['status'=>$status,'provider_code'=>$providerCode,'provider_message'=>$providerMessage]);$quota=in_array($providerCode,['insufficient_quota','credit_balance_exhausted','organization_usage_limit_exceeded','organization_spend_limit_exceeded','project_spend_limit_exceeded'],true)||preg_match('/quota|billing|credit|usage limit|spend limit/i',$providerMessage);$message=match($status){401=>'The OpenAI API key was rejected. Check OPENAI_API_KEY in api/.env, then refresh Laravel configuration.',403=>'OpenAI denied this request. Check that the API project allows the selected model.',429=>$quota?'The OpenAI API account has run out of credits or reached a billing/usage limit. Check API billing and limits; ChatGPT subscriptions do not include API usage.':'The OpenAI API rate limit was reached. Wait briefly before trying again.',default=>'The AI service returned HTTP '.$status.($providerMessage!==''?': '.$providerMessage:'')};return response()->json(['message'=>$message],502);}
-        $payload=$response->json(); $outputText=collect($payload['output'] ?? [])->flatMap(fn($item)=>$item['content'] ?? [])->first(fn($content)=>($content['type'] ?? null)==='output_text'); $raw=$outputText['text'] ?? $payload['output_text'] ?? null;
-        $draft=is_string($raw) ? json_decode($raw,true) : null;
-        if (! is_array($draft) || ! in_array($draft['kind'] ?? null,['task','meeting','clarification'],true)) return response()->json(['message'=>'The assistant returned an unreadable draft. Please rephrase and try again.'],502);
+        $system = 'You interpret one Kriyabot command as a task or meeting draft. '.$languageInstruction
+            .' Never claim you created or saved anything; the user confirms the draft afterwards.'
+            .' Current local time is '.now($timezone)->toIso8601String().' and the timezone is '.$timezone.'.'
+            .' If a date lacks a year choose the next future occurrence. A meeting without an end time lasts one hour.'
+            .' If the user asks for a task reminder but gives no due date, use kind=clarification and ask for the due date.'
+            .' Use kind=clarification whenever required details cannot be inferred.'
+            .' Existing projects: '.($projects->implode(', ') ?: 'none').'.'
+            .' Saved places (use the exact name as location_label when one is chosen): '.($places->map(fn($p)=>$p->name.' ('.$p->kind.')')->implode(', ') ?: 'none').'.';
+
+        $nullableString=['type'=>['string','null']];
+        $schema=['type'=>'object','properties'=>[
+            'kind'=>['type'=>'string','enum'=>['task','meeting','clarification']],
+            'reply'=>['type'=>'string','description'=>'Short friendly confirmation of what the draft contains.'],
+            'title'=>$nullableString,'description'=>$nullableString,'project_name'=>$nullableString,
+            'priority'=>['type'=>['string','null'],'enum'=>['low','normal','high','urgent',null]],
+            'due_at'=>['type'=>['string','null'],'description'=>'ISO 8601 with offset, or null'],
+            'starts_at'=>['type'=>['string','null'],'description'=>'ISO 8601 with offset, or null'],
+            'ends_at'=>['type'=>['string','null'],'description'=>'ISO 8601 with offset, or null'],
+            'attendee_name'=>$nullableString,
+            'reminder_minutes'=>['type'=>['integer','null']],
+            'location_type'=>['type'=>['string','null'],'enum'=>['office','saved_place','online','custom',null]],
+            'location_label'=>$nullableString,'online_url'=>$nullableString,'clarification'=>$nullableString,
+        ],'required'=>['kind','reply']];
+
+        $result=$ai->structured($system,'User command: '.$data['command'],$schema);
+        if (! $result['ok']) return response()->json(['message'=>$result['message']],$result['status'] ?? 502);
+        $draft=$result['data'];
+        if (! in_array($draft['kind'] ?? null,['task','meeting','clarification'],true)) return response()->json(['message'=>'The assistant returned an unreadable draft. Please rephrase and try again.'],502);
         $draft['timezone']=$timezone;
-        if (($draft['kind'] ?? '')==='meeting' && !empty($draft['location_type']) && $draft['location_type']==='saved_place') {
+        if (($draft['kind'] ?? '')==='meeting' && ($draft['location_type'] ?? null)==='saved_place') {
             $place=$places->first(fn($p)=>mb_strtolower($p->name)===mb_strtolower((string)($draft['location_label'] ?? '')));
             $draft['saved_place_id']=$place?->id;
         }
         return response()->json(['draft'=>$draft]);
     }
 
-    public function ask(Request $request)
+    public function ask(Request $request, AiClient $ai)
     {
         $data=$request->validate([
             'message'=>['required','string','max:2000'],
             'input_language'=>['sometimes','in:en-IN,hi-IN'],
             'history'=>['sometimes','array','max:10'],
             'history.*.role'=>['required','in:user,assistant'],
-            'history.*.content'=>['required','string','max:2000'],
+            'history.*.content'=>['required','string','max:8000'],
         ]);
         $user=$request->user();
+        if (! $ai->configured()) return response()->json(['message'=>$ai->notConfiguredMessage()],422);
         $timezone=$this->userTimezone($user);
-        $key=config('taskflow.ai.api_key');
-        if(!$key)return response()->json(['message'=>'The AI assistant is not configured yet. Add OPENAI_API_KEY to the API .env file, then restart Laravel.'],422);
-
         $today=now($timezone)->toDateString();
         $agenda=$this->todaySchedule($user);
         $name=$user->preferences?->assistant_name ?: 'Kriyabot Assistant';
-        $language = ($data['input_language'] ?? 'en-IN') === 'hi-IN' ? 'Hindi (Devanagari)' : 'Indian English';
-        $searchContext=$data['message'];
-        $scheduleQuestion=(bool)preg_match('/\b(my|our)\s+(?:today\s+)?(?:schedule|calendar|tasks?|meetings?|agenda)\b|\b(?:due|pending)\s+(?:tasks?|work|items?)\b/i',$searchContext);
-        $needsWebSearch=!$scheduleQuestion&&(bool)preg_match('/\b(search|look up|research|latest|current|recent|news|right now|this week|this month|price|weather|live|compare products)\b/i',$searchContext);
-        $searchGuidance=$needsWebSearch?'Web search is enabled for this request; use it for current facts and cite the returned sources.':'Web search is not enabled for this request. Do not claim that you searched; answer from the supplied schedule or general knowledge, and say when a current lookup is needed.';
-        $system="You are {$name}, a warm, respectful, practical personal assistant and supportive companion for {$user->name}. Be friendly without claiming to be human, a real friend, or to have feelings. Reply in {$language}, matching that language for speech-friendly answers. Use the user's timezone {$timezone}. Today's date is {$today}. Today's Kriyabot schedule (only use this data for their schedule): ".json_encode($agenda,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES).". If it is empty, say they have no special schedule currently saved and they can enjoy a free day or add plans. {$searchGuidance} Be transparent about uncertainty and never fabricate sources. Do not say you saved/changed tasks or meetings; task creation is available in the dedicated assistant planner. Keep answers concise and conversational.";
-        $history=collect($data['history'] ?? [])->map(fn($item)=>['role'=>$item['role'],'content'=>$item['content']]);
-        $input=[['role'=>'developer','content'=>$system],...$history->all(),['role'=>'user','content'=>$data['message']]];
-        $payload=['model'=>config('taskflow.ai.model','gpt-4.1-mini'),'store'=>false,'input'=>$input];
-        if($needsWebSearch)$payload['tools']=[['type'=>'web_search']];
-        try{
-            $response=Http::withToken($key)->timeout(45)->post('https://api.openai.com/v1/responses',$payload);
-        }catch(ConnectionException $e){Log::error('Kriyabot AI chat connection failed',['error'=>$e->getMessage()]);return response()->json(['message'=>'The API server could not connect securely to the AI service. Check the server TLS certificate trust, DNS, and outbound HTTPS.'],502);}
-        catch(\Throwable $e){Log::error('Kriyabot AI chat failed',['type'=>get_class($e),'error'=>$e->getMessage()]);return response()->json(['message'=>'The AI service could not answer this request. Check the API server log for details.'],502);}
-        if(!$response->successful()){
-            $status=$response->status();$providerMessage=(string)data_get($response->json(),'error.message','');$providerCode=(string)data_get($response->json(),'error.code','');
-            Log::warning('Kriyabot AI chat returned an error',['status'=>$status,'provider_code'=>$providerCode,'provider_message'=>$providerMessage]);
-            $quota=in_array($providerCode,['insufficient_quota','credit_balance_exhausted','organization_usage_limit_exceeded','organization_spend_limit_exceeded','project_spend_limit_exceeded'],true)||preg_match('/quota|billing|credit|usage limit|spend limit/i',$providerMessage);
-            return response()->json(['message'=>match($status){401=>'The OpenAI API key was rejected. Check the API server key.',403=>'OpenAI denied this request. Check model and web search access.',429=>$quota?'The OpenAI API account has run out of credits or reached a billing/usage limit. Check API billing and limits; ChatGPT subscriptions do not include API usage.':'The OpenAI API rate limit was reached. Wait briefly before trying again.',default=>'The AI service returned HTTP '.$status.($providerMessage!==''?': '.$providerMessage:'')}],502);
-        }
-        $payload=$response->json();$messageItem=collect($payload['output'] ?? [])->first(fn($item)=>($item['type'] ?? '')==='message');
-        $content=collect($messageItem['content'] ?? [])->first(fn($item)=>($item['type'] ?? '')==='output_text');
-        $text=$content['text'] ?? $payload['output_text'] ?? '';
-        $sources=collect($content['annotations'] ?? [])->filter(fn($item)=>($item['type'] ?? '')==='url_citation')
-            ->map(fn($item)=>['url'=>$item['url'] ?? null,'title'=>$item['title'] ?? $item['url'] ?? 'Source'])
-            ->filter(fn($item)=>is_string($item['url']) && str_starts_with($item['url'],'https://'))->unique('url')->values();
-        return response()->json(['answer'=>$text,'sources'=>$sources,'searched'=>collect($payload['output'] ?? [])->contains(fn($item)=>($item['type'] ?? '')==='web_search_call')]);
+        $language=($data['input_language'] ?? 'en-IN')==='hi-IN' ? 'Hindi (Devanagari)' : 'Indian English';
+        $message=$data['message'];
+        $scheduleQuestion=(bool)preg_match('/\b(my|our)\s+(?:today\s+)?(?:schedule|calendar|tasks?|meetings?|agenda)\b|\b(?:due|pending)\s+(?:tasks?|work|items?)\b/i',$message);
+        $needsWebSearch=!$scheduleQuestion&&(bool)preg_match('/\b(search|look up|research|latest|current|recent|news|today\'?s|right now|this week|this month|price|rate|weather|live|score|compare products)\b/i',$message);
+        $searchGuidance=$needsWebSearch
+            ? 'Web search is available for this request; use it for current facts and rely on the cited results.'
+            : 'Web search is not available for this request. Do not claim that you searched; answer from the supplied schedule or general knowledge, and say when a current lookup would be needed.';
+        $system="You are {$name}, a warm, respectful, practical personal assistant for {$user->name}. Be friendly without claiming to be human or to have feelings. Reply in {$language}; keep answers short and speech-friendly (no markdown tables). The user's timezone is {$timezone} and today's date is {$today}. Today's Kriyabot schedule (use only this data for their schedule): ".json_encode($agenda,JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES).". If it is empty, say there is nothing scheduled and they can add plans. {$searchGuidance} Be transparent about uncertainty and never invent sources. Do not say you saved or changed tasks or meetings; creating them happens in the assistant planner.";
+
+        $result=$ai->chat($system,$data['history'] ?? [],$message,$needsWebSearch);
+        if (! $result['ok']) return response()->json(['message'=>$result['message']],$result['status'] ?? 502);
+        return response()->json(['answer'=>$result['answer'],'sources'=>$result['sources'],'searched'=>$result['searched']]);
     }
 
     private function todaySchedule(User $user): array
